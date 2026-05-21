@@ -167,16 +167,42 @@ If your user is not `pi` or the repo lives somewhere other than `/home/pi/meshpi
 
 The unit uses `WantedBy=graphical.target` and a `DISPLAY=:0` environment so the Tk GUI can draw on the autologin desktop session. If you run a headless setup or a different display server, adjust accordingly.
 
-### 8. Backlight schedule (optional)
+### 8. Screen, backlight, and on-screen keyboard
+
+There are three independent layers that affect the touchscreen:
+
+1. **OS screen blanking.** Bookworm's compositor blanks the display after about 10 minutes of no input by default. The meshpi GUI does not generate input events, so the screen will go dark unless this is disabled.
+2. **Backlight schedule.** Optional day/night timers that physically dim or blank the panel on a schedule (independent of OS idle).
+3. **On-screen keyboard.** Optional `matchbox-keyboard` so the in-app `Kbd` button in the Messages tab has something to launch.
+
+Run the helper script to do all three with prompts:
 
 ```bash
+bash scripts/pi_setup.sh
+```
+
+Pass `--yes` to accept all defaults non-interactively. The script:
+
+- runs `raspi-config nonint do_blanking 1` to disable OS screen blanking,
+- copies `systemd/meshpi-backlight-{day,night}.{service,timer}` to `/etc/systemd/system/` and enables both timers,
+- installs `matchbox-keyboard` via apt.
+
+Reboot after running it the first time so the screen blanking change takes effect: `sudo reboot`.
+
+If you prefer to do these by hand:
+
+```bash
+sudo raspi-config           # Display Options -> Screen Blanking -> No
 sudo cp systemd/meshpi-backlight-*.service /etc/systemd/system/
 sudo cp systemd/meshpi-backlight-*.timer   /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now meshpi-backlight-day.timer meshpi-backlight-night.timer
+sudo apt install -y matchbox-keyboard
 ```
 
-Edit the `ExecStart` paths and values in the two `.service` files to match your sysfs path and brightness levels.
+Edit the times in the two `.timer` files and the brightness values in the two `.service` files to match your hours and display. Verify your backlight path first: `ls /sys/class/backlight/`. Common candidates are `/sys/class/backlight/rpi_backlight/brightness` and `/sys/class/backlight/10-0045/brightness`.
+
+The `Kbd` button in the Messages tab launches the first available of: `wvkbd-mobintl`, `matchbox-keyboard`, `onboard`, `florence`. Press the button again to dismiss.
 
 ### 9. PostGIS sync (optional)
 

@@ -18,6 +18,8 @@ from __future__ import annotations
 import logging
 import math
 import queue
+import shutil
+import subprocess
 import threading
 import tkinter as tk
 from collections.abc import Callable
@@ -156,6 +158,10 @@ class MessagingGui:
         self._map_canvas: tk.Canvas | None = None
         self._map_status_var: tk.StringVar | None = None
 
+        # Virtual keyboard subprocess (matchbox-keyboard / wvkbd / onboard).
+        self._kb_process: subprocess.Popen | None = None
+        self._kb_button: ttk.Button | None = None
+
     # ----- thread-safe inputs -----
 
     def push_event(self, event_type: str, payload: Any) -> None:
@@ -166,6 +172,8 @@ class MessagingGui:
 
     def stop(self) -> None:
         self._stop_event.set()
+        # Tear down any spawned virtual keyboard before destroying the window.
+        self._kill_keyboard()
         # Schedule the destroy on the Tk thread.
         root = self.root
         if root is not None:
@@ -173,6 +181,58 @@ class MessagingGui:
                 root.after(0, root.destroy)
             except Exception:  # noqa: BLE001
                 pass
+
+    # ----- virtual keyboard -----
+
+    # Order matters: prefer Wayland-native, then X11 options. The first one
+    # that is on PATH is used.
+    _KEYBOARD_COMMANDS: tuple[tuple[str, list[str]], ...] = (
+        ("wvkbd-mobintl", ["wvkbd-mobintl", "-L", "240"]),
+        ("matchbox-keyboard", ["matchbox-keyboard"]),
+        ("onboard", ["onboard"]),
+        ("florence", ["florence"]),
+    )
+
+    def _toggle_keyboard(self) -> None:
+        """Show or hide a virtual on-screen keyboard."""
+        if self._kb_process is not None and self._kb_process.poll() is None:
+            self._kill_keyboard()
+            self._set_notice("keyboard hidden")
+            return
+
+        for name, argv in self._KEYBOARD_COMMANDS:
+            if shutil.which(argv[0]) is None:
+                continue
+            try:
+                self._kb_process = subprocess.Popen(  # noqa: S603
+                    argv,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self._set_notice(f"keyboard: {name}")
+                log.info("launched virtual keyboard: %s", name)
+                return
+            except Exception:  # noqa: BLE001
+                log.exception("failed to launch %s", name)
+
+        self._set_notice(
+            "no on-screen keyboard installed; "
+            "try: sudo apt install matchbox-keyboard"
+        )
+
+    def _kill_keyboard(self) -> None:
+        proc = self._kb_process
+        self._kb_process = None
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        except Exception:  # noqa: BLE001
+            log.debug("error terminating keyboard process", exc_info=True)
 
     # ----- Tk main loop -----
 
@@ -297,6 +357,14 @@ class MessagingGui:
         self._compose_var = tk.StringVar()
         entry = ttk.Entry(compose, textvariable=self._compose_var, font=("DejaVu Sans", 16))
         entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        # Virtual keyboard toggle. Off by default; useful when typing freeform
+        # messages on the touchscreen. Hidden if no on-screen keyboard is
+        # available; press again to dismiss.
+        self._kb_button = ttk.Button(
+            compose, text="Kbd", style="Big.TButton",
+            command=self._toggle_keyboard,
+        )
+        self._kb_button.pack(side="right", padx=(0, 6))
         ttk.Button(
             compose, text="Send", style="Big.TButton", command=self._on_send_pressed
         ).pack(side="right")
