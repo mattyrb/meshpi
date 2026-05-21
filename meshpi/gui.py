@@ -327,6 +327,9 @@ class MessagingGui:
         except tk.TclError:
             pass
         style.configure("Big.TButton", font=("DejaVu Sans", 18), padding=12)
+        # Smaller variant for non-primary actions (e.g. Broadcast position now)
+        # so they do not dominate the layout.
+        style.configure("Small.TButton", font=("DejaVu Sans", 11), padding=4)
         style.configure("Glance.TLabel", font=("DejaVu Sans", 14))
         style.configure("Heading.TLabel", font=("DejaVu Sans", 20, "bold"))
         style.configure("Notice.TLabel", font=("DejaVu Sans", 12), foreground="#aa3300")
@@ -342,6 +345,7 @@ class MessagingGui:
         self._notebook.pack(fill="both", expand=True, padx=4, pady=4)
 
         self._notebook.add(self._build_glance_tab(), text="Glance")
+        self._notebook.add(self._build_nodes_tab(), text="Nodes")
         self._notebook.add(self._build_messages_tab(), text="Messages")
         self._notebook.add(self._build_map_tab(), text="Map")
 
@@ -349,9 +353,9 @@ class MessagingGui:
         assert self.root is not None
         frame = ttk.Frame(self.root, padding=12)
 
-        # Two-column header row: mesh stats left, our-node stats right.
+        # Two-column header: mesh stats left, our-node stats right.
         header = ttk.Frame(frame)
-        header.pack(fill="x")
+        header.pack(fill="both", expand=True)
         header.grid_columnconfigure(0, weight=1, uniform="cols")
         header.grid_columnconfigure(1, weight=1, uniform="cols")
 
@@ -376,6 +380,8 @@ class MessagingGui:
         right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         ttk.Label(right, text="Our node", style="Heading.TLabel").pack(anchor="w", pady=(0, 6))
         for key, label in [
+            ("our_name", "Name:"),
+            ("our_id", "ID:"),
             ("our_battery", "Battery:"),
             ("our_uptime", "Uptime:"),
             ("our_position", "Position:"),
@@ -387,32 +393,47 @@ class MessagingGui:
             var = tk.StringVar(value="--")
             self._glance_vars[key] = var
             ttk.Label(row, textvariable=var, style="Glance.TLabel").pack(side="left")
-        # Broadcast button. Disabled when send_position was not wired.
+        # Smaller button so it does not dominate the column.
         btn_state = "normal" if self._send_position is not None else "disabled"
         self._broadcast_btn = ttk.Button(
             right,
             text="Broadcast position now",
-            style="Big.TButton",
+            style="Small.TButton",
             state=btn_state,
             command=self._on_broadcast_position,
         )
         self._broadcast_btn.pack(anchor="w", pady=(8, 0))
 
-        # Compact node table below the two columns.
+        return frame
+
+    def _build_nodes_tab(self) -> ttk.Frame:
+        """Scrollable list of every node we have ever heard."""
+        assert self.root is not None
+        frame = ttk.Frame(self.root, padding=8)
+
         ttk.Label(frame, text="Nodes", style="Heading.TLabel").pack(
-            anchor="w", pady=(12, 4)
+            anchor="w", pady=(0, 6)
         )
+
+        # Wrap treeview + scrollbar so the bar tracks the table vertically.
+        wrap = ttk.Frame(frame)
+        wrap.pack(fill="both", expand=True)
+
         cols = ("name", "last_heard", "battery", "snr")
-        tree = ttk.Treeview(frame, columns=cols, show="headings", height=6)
+        tree = ttk.Treeview(wrap, columns=cols, show="headings")
         for col, label, w in [
-            ("name", "Name", 220),
+            ("name", "Name", 260),
             ("last_heard", "Last heard", 180),
             ("battery", "Batt %", 80),
             ("snr", "SNR", 80),
         ]:
             tree.heading(col, text=label)
             tree.column(col, width=w, anchor="w")
-        tree.pack(fill="both", expand=True)
+        vscroll = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vscroll.set)
+        tree.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
         self._nodes_tree = tree
         return frame
 
@@ -801,11 +822,12 @@ class MessagingGui:
         # Our-node block.
         self._refresh_our_node_stats(my_lat, my_lon)
 
-        # Refresh nodes treeview.
+        # Nodes table lives on its own tab now; refresh it from here so
+        # we don't duplicate the SQLite query.
         tree = getattr(self, "_nodes_tree", None)
         if tree is not None:
             tree.delete(*tree.get_children())
-            for n in nodes[:50]:
+            for n in nodes:
                 name = n.get("long_name") or n.get("short_name") or n.get("node_id") or "?"
                 tree.insert(
                     "",
@@ -827,6 +849,17 @@ class MessagingGui:
         except Exception:  # noqa: BLE001
             log.exception("my_node_stats_provider failed")
             stats = {}
+
+        # Name: "Long Name (SHRT)" when both are known; fall back gracefully.
+        long_name = stats.get("long_name")
+        short_name = stats.get("short_name")
+        if long_name and short_name:
+            name_label = f"{long_name} ({short_name})"
+        else:
+            name_label = long_name or short_name or "(unknown)"
+        self._glance_vars["our_name"].set(name_label)
+
+        self._glance_vars["our_id"].set(stats.get("node_id") or "?")
 
         batt = stats.get("battery_level")
         self._glance_vars["our_battery"].set(

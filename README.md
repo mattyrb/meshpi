@@ -329,9 +329,11 @@ If it will not start, check the last failure reason with `sudo systemctl status 
 
 ## GUI overview
 
-The touchscreen app has three tabs.
+The touchscreen app has four tabs.
 
-**Glance.** Two-column header: left side has mesh stats (nodes heard, last message, farthest contact today, today's per-channel message counts, local time); right side has our-node stats (battery, uptime, current position, time since our last position broadcast) and a `Broadcast position now` button that asks the node to retransmit its position immediately (useful after moving the node or changing fixed_position). Below the header is a compact nodes table sorted by last-heard.
+**Glance.** Two columns. Left: mesh stats (nodes heard, last message, farthest contact today, today's per-channel message counts, local time). Right: our-node stats (name, node id, battery, uptime, current position, time since last position broadcast) and a small `Broadcast position now` button that asks the node to retransmit its position immediately (useful after moving the node or changing fixed_position).
+
+**Nodes.** Scrollable table of every node we have heard, sorted by most recently heard. Columns: name, last heard, battery, SNR.
 
 **Messages.** Recent text messages with a tag prefix per message: `[ch:0 default]` for broadcasts on a channel, or `[DM→us]` / `[DM→<hex>]` for direct messages. Below the message list, a `Channel:` dropdown picks the channel for outgoing sends, a `To:` dropdown picks the destination (default `Broadcast`, or a specific node for a DM), then a freeform entry, a `Kbd` toggle for the on-screen keyboard, and a `Send` button. Below that, large canned-message buttons drawn from `gui.canned_messages` in `config.toml`.
 

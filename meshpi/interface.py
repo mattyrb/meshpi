@@ -222,12 +222,17 @@ class InterfaceManager:
         """Compact summary of our own node for the Glance tab.
 
         Keys (all optional; missing fields are None):
+          long_name, short_name: strings as set in the Meshtastic config
+          node_id: '!xxxxxxxx' format
           battery_level: int (0..100)
           uptime_seconds: int
           position_age_seconds: float  -- seconds since our last position update
           latitude, longitude: floats
         """
         out: dict[str, Any] = {
+            "long_name": None,
+            "short_name": None,
+            "node_id": None,
             "battery_level": None,
             "uptime_seconds": None,
             "position_age_seconds": None,
@@ -235,8 +240,12 @@ class InterfaceManager:
             "longitude": None,
         }
         info = self.my_node_info() or {}
+        user = info.get("user") or {}
         dm = info.get("deviceMetrics") or {}
         pos = info.get("position") or {}
+        out["long_name"] = user.get("longName")
+        out["short_name"] = user.get("shortName")
+        out["node_id"] = user.get("id") or self.my_node_id()
         out["battery_level"] = dm.get("batteryLevel")
         out["uptime_seconds"] = dm.get("uptimeSeconds")
         out["latitude"] = pos.get("latitude")
