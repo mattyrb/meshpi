@@ -225,6 +225,17 @@ class MessagingGui:
         self._kb_process: subprocess.Popen | None = None
         self._kb_button: ttk.Button | None = None
 
+        # Nodes-tab sort state. None means "use insertion order".
+        self._nodes_sort_col: str | None = None
+        self._nodes_sort_desc: bool = False
+        # Base header labels without the arrow indicator, so we can rebuild them.
+        self._nodes_col_labels: dict[str, str] = {
+            "name": "Name",
+            "last_heard": "Last heard",
+            "battery": "Batt %",
+            "snr": "SNR",
+        }
+
     # ----- thread-safe inputs -----
 
     def push_event(self, event_type: str, payload: Any) -> None:
@@ -407,7 +418,9 @@ class MessagingGui:
         return frame
 
     def _build_nodes_tab(self) -> ttk.Frame:
-        """Scrollable list of every node we have ever heard."""
+        """Scrollable list of every node we have ever heard. Columns are
+        click-to-sort; click again to toggle direction. An arrow on the
+        active column shows the current sort order."""
         assert self.root is not None
         frame = ttk.Frame(self.root, padding=8)
 
@@ -419,16 +432,24 @@ class MessagingGui:
         wrap = ttk.Frame(frame)
         wrap.pack(fill="both", expand=True)
 
-        cols = ("name", "last_heard", "battery", "snr")
-        tree = ttk.Treeview(wrap, columns=cols, show="headings")
-        for col, label, w in [
-            ("name", "Name", 260),
-            ("last_heard", "Last heard", 180),
-            ("battery", "Batt %", 80),
-            ("snr", "SNR", 80),
-        ]:
-            tree.heading(col, text=label)
-            tree.column(col, width=w, anchor="w")
+        # 'last_heard_raw' carries the original ISO 8601 UTC timestamp so the
+        # Last heard sort is correct across year boundaries. It is hidden via
+        # displaycolumns but still queryable via tree.set().
+        cols = ("name", "last_heard", "battery", "snr", "last_heard_raw")
+        tree = ttk.Treeview(
+            wrap, columns=cols, show="headings",
+            displaycolumns=("name", "last_heard", "battery", "snr"),
+        )
+        widths = {"name": 260, "last_heard": 180, "battery": 80, "snr": 80}
+        for col, label in self._nodes_col_labels.items():
+            tree.heading(
+                col, text=label,
+                command=lambda c=col: self._sort_nodes_by(c),
+            )
+            tree.column(col, width=widths[col], anchor="w")
+        # The raw column must still be configured even though it is hidden.
+        tree.column("last_heard_raw", width=0, stretch=False)
+
         vscroll = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vscroll.set)
         tree.pack(side="left", fill="both", expand=True)
@@ -436,6 +457,48 @@ class MessagingGui:
 
         self._nodes_tree = tree
         return frame
+
+    def _sort_nodes_by(self, col: str) -> None:
+        """Toggle sort on a column. First click ascending, second descending."""
+        if self._nodes_sort_col == col:
+            self._nodes_sort_desc = not self._nodes_sort_desc
+        else:
+            self._nodes_sort_col = col
+            self._nodes_sort_desc = False
+        self._apply_node_sort()
+
+    def _apply_node_sort(self) -> None:
+        """Re-order the Nodes treeview by the active sort column."""
+        tree = self._nodes_tree
+        col = self._nodes_sort_col
+        if tree is None or col is None:
+            return
+
+        # Numeric columns parse to float; string columns sort case-insensitive.
+        # For last_heard we sort on the hidden raw ISO timestamp.
+        sort_key_col = "last_heard_raw" if col == "last_heard" else col
+        numeric = col in ("battery", "snr")
+
+        def sort_key(iid: str):
+            v = tree.set(iid, sort_key_col)
+            if numeric:
+                try:
+                    return (0, float(v))
+                except (TypeError, ValueError):
+                    # Missing values sink to the bottom of an ascending sort.
+                    return (1, 0.0)
+            # Strings: empty values sink to the bottom of ascending sort.
+            return (1 if not v else 0, (v or "").lower())
+
+        ordered = sorted(tree.get_children(""), key=sort_key,
+                         reverse=self._nodes_sort_desc)
+        for idx, iid in enumerate(ordered):
+            tree.move(iid, "", idx)
+
+        # Update header text so the arrow shows on the active column.
+        arrow = " ▼" if self._nodes_sort_desc else " ▲"  # ▼ / ▲
+        for c, base in self._nodes_col_labels.items():
+            tree.heading(c, text=base + (arrow if c == col else ""))
 
     def _on_broadcast_position(self) -> None:
         if self._send_position is None:
@@ -829,16 +892,21 @@ class MessagingGui:
             tree.delete(*tree.get_children())
             for n in nodes:
                 name = n.get("long_name") or n.get("short_name") or n.get("node_id") or "?"
+                raw_heard = n.get("last_heard_utc") or ""
                 tree.insert(
                     "",
                     "end",
                     values=(
                         name,
-                        self._fmt_time(n.get("last_heard_utc")),
+                        self._fmt_time(raw_heard) if raw_heard else "",
                         n.get("battery_level") if n.get("battery_level") is not None else "",
                         f"{n['snr']:.1f}" if n.get("snr") is not None else "",
+                        raw_heard,   # hidden, used for correct time sort
                     ),
                 )
+            # Preserve the user's chosen sort across refreshes.
+            if self._nodes_sort_col is not None:
+                self._apply_node_sort()
 
     def _refresh_our_node_stats(
         self, my_lat: float | None, my_lon: float | None,

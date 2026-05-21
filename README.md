@@ -34,6 +34,7 @@ meshpi/
   scripts/
     pi_setup.sh             # one-shot Pi setup helper
     backup_sqlite.sh        # online .backup wrapper
+    export_csv.py           # messages/nodes/packets -> CSV
     postgis_sync.py
   systemd/
     meshpi.service
@@ -299,7 +300,35 @@ journalctl -u meshpi -p err                   # errors only
 
 Crank verbosity by editing the service file to add `Environment=MESHPI_LOG_LEVEL=DEBUG`, then `sudo systemctl daemon-reload && sudo systemctl restart meshpi`.
 
-Quick SQLite inspection without stopping meshpi (WAL mode allows concurrent reads):
+### CSV export of messages, nodes, or packets
+
+For repeatable exports use `scripts/export_csv.py`. Safe to run while meshpi is writing (WAL mode allows concurrent readers). Reads the database path from the same `config.toml` the app uses.
+
+```bash
+cd ~/meshpi
+source .venv/bin/activate
+# Today's messages plus the current node directory, default destination ~/meshpi-exports/
+python scripts/export_csv.py --since today --tables messages,nodes
+# Last 7 days of every packet (with raw_json) to a chosen directory
+python scripts/export_csv.py --since 7d --tables packets --out ~/exports
+# Everything, ever, to stdout for piping
+python scripts/export_csv.py --since all --tables messages --stdout
+```
+
+`--since` accepts `today`, `all`, or `NNd` / `NNh` (e.g. `1d`, `24h`, `7d`, `30d`). `--tables` is any comma-separated subset of `messages`, `packets`, `nodes`. Output filenames are `meshpi-<table>-<since>-<timestamp>.csv`.
+
+For one-shot ad-hoc queries the `sqlite3` CLI in CSV mode is hard to beat:
+
+```bash
+sqlite3 -header -csv /mnt/meshpi-data/meshpi.db \
+  "SELECT rx_time_utc, from_id, to_id, channel, text
+   FROM packets WHERE text IS NOT NULL ORDER BY id" \
+  > ~/messages.csv
+```
+
+### Quick SQLite inspection
+
+Without stopping meshpi (WAL mode allows concurrent reads):
 
 ```bash
 sqlite3 /mnt/meshpi-data/meshpi.db "SELECT COUNT(*) FROM packets; SELECT COUNT(*) FROM nodes;"
