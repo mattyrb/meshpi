@@ -299,15 +299,22 @@ class SqliteLogger:
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def known_nodes(self) -> list[dict[str, Any]]:
+        """All nodes in the directory, augmented with the most recent RSSI
+        we have observed from each (subqueried from packets at read time so
+        we do not need a schema migration). RSSI is a per-packet measurement
+        in dBm; typical Meshtastic values are roughly -120 .. -40."""
         if self._conn is None:
             return []
         with self._lock:
             cur = self._conn.execute(
                 """
-                SELECT node_id, long_name, short_name, last_heard_utc,
-                       battery_level, latitude, longitude, snr
-                  FROM nodes
-                 ORDER BY last_heard_utc DESC NULLS LAST
+                SELECT n.node_id, n.long_name, n.short_name, n.last_heard_utc,
+                       n.battery_level, n.latitude, n.longitude, n.snr,
+                       (SELECT p.rssi FROM packets p
+                          WHERE p.from_id = n.node_id AND p.rssi IS NOT NULL
+                          ORDER BY p.id DESC LIMIT 1) AS last_rssi
+                  FROM nodes n
+                 ORDER BY n.last_heard_utc DESC NULLS LAST
                 """
             )
             cols = [c[0] for c in cur.description]

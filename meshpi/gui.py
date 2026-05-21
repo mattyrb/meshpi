@@ -232,7 +232,7 @@ class MessagingGui:
         self._nodes_col_labels: dict[str, str] = {
             "name": "Name",
             "last_heard": "Last heard",
-            "battery": "Batt %",
+            "rssi": "RSSI",
             "snr": "SNR",
         }
 
@@ -435,12 +435,12 @@ class MessagingGui:
         # 'last_heard_raw' carries the original ISO 8601 UTC timestamp so the
         # Last heard sort is correct across year boundaries. It is hidden via
         # displaycolumns but still queryable via tree.set().
-        cols = ("name", "last_heard", "battery", "snr", "last_heard_raw")
+        cols = ("name", "last_heard", "rssi", "snr", "last_heard_raw")
         tree = ttk.Treeview(
             wrap, columns=cols, show="headings",
-            displaycolumns=("name", "last_heard", "battery", "snr"),
+            displaycolumns=("name", "last_heard", "rssi", "snr"),
         )
-        widths = {"name": 260, "last_heard": 180, "battery": 80, "snr": 80}
+        widths = {"name": 260, "last_heard": 180, "rssi": 80, "snr": 80}
         for col, label in self._nodes_col_labels.items():
             tree.heading(
                 col, text=label,
@@ -477,7 +477,7 @@ class MessagingGui:
         # Numeric columns parse to float; string columns sort case-insensitive.
         # For last_heard we sort on the hidden raw ISO timestamp.
         sort_key_col = "last_heard_raw" if col == "last_heard" else col
-        numeric = col in ("battery", "snr")
+        numeric = col in ("rssi", "snr")
 
         def sort_key(iid: str):
             v = tree.set(iid, sort_key_col)
@@ -893,13 +893,14 @@ class MessagingGui:
             for n in nodes:
                 name = n.get("long_name") or n.get("short_name") or n.get("node_id") or "?"
                 raw_heard = n.get("last_heard_utc") or ""
+                rssi = n.get("last_rssi")
                 tree.insert(
                     "",
                     "end",
                     values=(
                         name,
                         self._fmt_time(raw_heard) if raw_heard else "",
-                        n.get("battery_level") if n.get("battery_level") is not None else "",
+                        f"{int(round(float(rssi)))}" if rssi is not None else "",
                         f"{n['snr']:.1f}" if n.get("snr") is not None else "",
                         raw_heard,   # hidden, used for correct time sort
                     ),
