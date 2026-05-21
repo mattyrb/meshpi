@@ -34,6 +34,10 @@ log = logging.getLogger(__name__)
 # Earth radius in km, used for the "farthest contact today" stat.
 _EARTH_KM = 6371.0088
 
+# Statute miles per degree of latitude (constant), used by the map's
+# fixed-radius bbox helper and the scale bar.
+_MI_PER_DEG_LAT = 69.0
+
 
 def _haversine_km(
     lat1: float, lon1: float, lat2: float, lon2: float
@@ -69,6 +73,25 @@ def _classify_destination(
         return "[DM→us]"
     short = to_id[-4:] if to_id.startswith("!") else to_id
     return f"[DM→{short}]"
+
+
+def _bbox_around(
+    center_lat: float, center_lon: float, radius_mi: float,
+) -> tuple[float, float, float, float]:
+    """Square bbox around a center point with the given radius in miles.
+
+    Longitude span is widened by 1/cos(lat) so that the projected map looks
+    roughly square at the visible latitude rather than stretched east-west.
+    """
+    lat_delta = radius_mi / _MI_PER_DEG_LAT
+    cos_lat = max(math.cos(math.radians(center_lat)), 0.01)
+    lon_delta = radius_mi / (_MI_PER_DEG_LAT * cos_lat)
+    return (
+        center_lat - lat_delta,
+        center_lat + lat_delta,
+        center_lon - lon_delta,
+        center_lon + lon_delta,
+    )
 
 
 def _bbox_with_padding(
@@ -157,6 +180,11 @@ class MessagingGui:
         # Map tab state.
         self._map_canvas: tk.Canvas | None = None
         self._map_status_var: tk.StringVar | None = None
+        # Map viewing radius in statute miles. None means auto-fit to all
+        # positioned nodes (the previous default). Touching the buttons in
+        # the map control bar updates this and triggers a redraw.
+        self._map_scale_miles: float | None = None
+        self._map_scale_buttons: dict[str, ttk.Button] = {}
 
         # Virtual keyboard subprocess (matchbox-keyboard / wvkbd / onboard).
         self._kb_process: subprocess.Popen | None = None
@@ -390,19 +418,39 @@ class MessagingGui:
     def _build_map_tab(self) -> ttk.Frame:
         """Simple offline scatter map. No tiles, no external deps.
 
-        Uses an equirectangular projection auto-fit to the bounding box of
-        all positioned nodes plus our own location. Spokes from our node
-        to each neighbor, dots colored by SNR.
+        Uses an equirectangular projection. By default auto-fits to the
+        bounding box of all positioned nodes. The scale buttons in the
+        control bar switch to a fixed radius around our own position,
+        which is what you want when a single distant node would otherwise
+        squash the local neighborhood into a few pixels.
         """
         assert self.root is not None
         frame = ttk.Frame(self.root, padding=4)
 
-        # Status bar at the top with what is plotted.
+        # Control bar: scale buttons on the left, status in the middle,
+        # redraw on the right.
         bar = ttk.Frame(frame)
         bar.pack(fill="x", pady=(0, 4))
+
+        ttk.Label(bar, text="Scale:", style="Glance.TLabel").pack(side="left", padx=(4, 4))
+        # (label, miles-or-None)
+        scale_options: list[tuple[str, float | None]] = [
+            ("1 mi", 1.0),
+            ("10 mi", 10.0),
+            ("25 mi", 25.0),
+            ("Full", None),
+        ]
+        for label, miles in scale_options:
+            btn = ttk.Button(
+                bar, text=label,
+                command=lambda m=miles: self._set_map_scale(m),
+            )
+            btn.pack(side="left", padx=2)
+            self._map_scale_buttons[label] = btn
+
         self._map_status_var = tk.StringVar(value="(no positions yet)")
         ttk.Label(bar, textvariable=self._map_status_var, style="Glance.TLabel").pack(
-            side="left", padx=4
+            side="left", padx=12
         )
         ttk.Button(bar, text="Redraw", command=self._redraw_map).pack(side="right")
 
@@ -412,7 +460,33 @@ class MessagingGui:
         self._map_canvas.pack(fill="both", expand=True)
         # Redraw when the canvas resizes (window resize, tab switch).
         self._map_canvas.bind("<Configure>", lambda _e: self._redraw_map())
+        self._update_scale_button_styles()
         return frame
+
+    def _set_map_scale(self, miles: float | None) -> None:
+        """Change the map's viewing radius and redraw."""
+        self._map_scale_miles = miles
+        self._update_scale_button_styles()
+        self._redraw_map()
+
+    def _update_scale_button_styles(self) -> None:
+        """Mark the active scale button so the user can see what's selected."""
+        if not self._map_scale_buttons:
+            return
+        active_label = self._scale_label(self._map_scale_miles)
+        for label, btn in self._map_scale_buttons.items():
+            if label == active_label:
+                btn.state(["pressed"])
+            else:
+                btn.state(["!pressed"])
+
+    @staticmethod
+    def _scale_label(miles: float | None) -> str:
+        if miles is None:
+            return "Full"
+        if miles == int(miles):
+            return f"{int(miles)} mi"
+        return f"{miles:g} mi"
 
     # ----- send actions -----
 
@@ -656,34 +730,51 @@ class MessagingGui:
             my_lat = my_lon = None
 
         status = self._map_status_var
-        if not positioned and (my_lat is None or my_lon is None):
-            if status is not None:
-                status.set("(no positions yet)")
-            canvas.create_text(
-                w // 2, h // 2,
-                text="No node positions yet. Once nodes broadcast positions,\n"
-                     "they will appear here.",
-                fill="#8aa", justify="center", font=("DejaVu Sans", 12),
+
+        # Decide the viewing bbox. Fixed-radius mode needs our position;
+        # if we don't have one yet, fall back to auto-fit and tell the user.
+        scale_miles = self._map_scale_miles
+        scale_note = ""
+        if scale_miles is not None and (my_lat is None or my_lon is None):
+            scale_miles = None
+            scale_note = " (need our position for fixed scale)"
+
+        if scale_miles is not None:
+            lat_min, lat_max, lon_min, lon_max = _bbox_around(
+                float(my_lat), float(my_lon), scale_miles
             )
-            return
+        else:
+            points: list[tuple[float, float]] = [
+                (float(n["latitude"]), float(n["longitude"])) for n in positioned
+            ]
+            if my_lat is not None and my_lon is not None:
+                points.append((float(my_lat), float(my_lon)))
+            if not points:
+                if status is not None:
+                    status.set("(no positions yet)")
+                canvas.create_text(
+                    w // 2, h // 2,
+                    text="No node positions yet. Once nodes broadcast positions,\n"
+                         "they will appear here.",
+                    fill="#8aa", justify="center", font=("DejaVu Sans", 12),
+                )
+                return
+            lat_min, lat_max, lon_min, lon_max = _bbox_with_padding(points)
 
-        # Build the lat/lon list we want to fit. Always include our position
-        # if we have one, so spokes have a valid origin.
-        points: list[tuple[float, float]] = [
-            (float(n["latitude"]), float(n["longitude"])) for n in positioned
+        # Filter to nodes inside the current viewing bbox.
+        in_view = [
+            n for n in positioned
+            if lat_min <= float(n["latitude"]) <= lat_max
+               and lon_min <= float(n["longitude"]) <= lon_max
         ]
-        if my_lat is not None and my_lon is not None:
-            points.append((float(my_lat), float(my_lon)))
 
-        lat_min, lat_max, lon_min, lon_max = _bbox_with_padding(points)
-
-        # Equirectangular projection scaled to canvas, longitude scaled by
-        # cos(mean lat) to approximate equal-area at the visible scale.
+        # Equirectangular projection scaled to canvas; longitude scaled by
+        # cos(mean lat) so a 5 mi east-west span looks the same as 5 mi
+        # north-south at the visible latitude.
         mean_lat_rad = math.radians((lat_min + lat_max) / 2)
         lon_scale = math.cos(mean_lat_rad) or 1.0
         lat_range = max(lat_max - lat_min, 1e-6)
         lon_range = max((lon_max - lon_min) * lon_scale, 1e-6)
-        # Pick the limiting axis so the map keeps an honest aspect ratio.
         avail_w = w - 2 * margin
         avail_h = h - 2 * margin
         scale = min(avail_w / lon_range, avail_h / lat_range)
@@ -699,13 +790,13 @@ class MessagingGui:
 
         # Spokes from our node first, so dots draw on top.
         if my_lat is not None and my_lon is not None:
-            mx, my = project(my_lat, my_lon)
-            for n in positioned:
+            mx, my = project(float(my_lat), float(my_lon))
+            for n in in_view:
                 nx, ny = project(float(n["latitude"]), float(n["longitude"]))
                 canvas.create_line(mx, my, nx, ny, fill="#22344a", width=1)
 
         # Neighbor dots.
-        for n in positioned:
+        for n in in_view:
             lat = float(n["latitude"])
             lon = float(n["longitude"])
             x, y = project(lat, lon)
@@ -723,17 +814,52 @@ class MessagingGui:
 
         # Our position last, larger, distinct color.
         if my_lat is not None and my_lon is not None:
-            mx, my = project(my_lat, my_lon)
+            mx, my = project(float(my_lat), float(my_lon))
             canvas.create_oval(mx - 8, my - 8, mx + 8, my + 8,
                                fill="#ff5c5c", outline="#ffffff", width=2)
             canvas.create_text(mx, my - 14, text="us", fill="#ffffff",
                                font=("DejaVu Sans", 10, "bold"), anchor="s")
 
+        # Small scale bar in the lower-left so the user can eyeball distance.
+        self._draw_scale_bar(canvas, w, h, scale, lon_scale)
+
         if status is not None:
+            mode = "Full extent" if scale_miles is None else f"{self._scale_label(scale_miles)} view"
             status.set(
-                f"{len(positioned)} positioned node(s)  "
-                f"{'with' if my_lat is not None else 'without'} our position"
+                f"{mode}{scale_note}: {len(in_view)} of {len(positioned)} positioned plotted"
             )
+
+    def _draw_scale_bar(
+        self,
+        canvas: tk.Canvas,
+        w: int,
+        h: int,
+        scale: float,
+        lon_scale: float,
+    ) -> None:
+        """Draw a small scale bar in the lower-left corner."""
+        # Pick a bar length in miles that fits roughly in 120 pixels.
+        # 1 mile in projected x-pixels = (1 / 69.0) * lon_scale * scale
+        px_per_mile = (1.0 / _MI_PER_DEG_LAT) * lon_scale * scale
+        if px_per_mile <= 0:
+            return
+        target_px = 120
+        # Choose a "nice" mile length: 1, 2, 5, 10, 25, 50, 100, ...
+        nice = [0.1, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000]
+        miles = nice[0]
+        for m in nice:
+            if m * px_per_mile <= target_px:
+                miles = m
+        bar_px = miles * px_per_mile
+        x0 = 14
+        y0 = h - 18
+        canvas.create_line(x0, y0, x0 + bar_px, y0, fill="#cdd6f4", width=3)
+        canvas.create_line(x0, y0 - 4, x0, y0 + 4, fill="#cdd6f4", width=2)
+        canvas.create_line(x0 + bar_px, y0 - 4, x0 + bar_px, y0 + 4,
+                           fill="#cdd6f4", width=2)
+        label = f"{miles:g} mi" if miles >= 1 else f"{miles:g} mi"
+        canvas.create_text(x0 + bar_px / 2, y0 - 10, text=label,
+                           fill="#cdd6f4", font=("DejaVu Sans", 9))
 
     def _refresh_map(self) -> None:
         """Schedule a redraw, used when events arrive."""
