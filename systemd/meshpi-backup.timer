@@ -1,0 +1,11 @@
+[Unit]
+Description=meshpi: run SQLite backup nightly at 03:00 local time
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+# If the Pi was off at 03:00, run it once at the next boot.
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target

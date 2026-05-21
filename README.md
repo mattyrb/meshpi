@@ -9,7 +9,7 @@ This README targets a Raspberry Pi 3 running Raspberry Pi OS Bookworm 64-bit wit
 - Owns the serial port to a Meshtastic node (Silicon Labs CP210x, `VID:PID 10C4:EA60`) using a stable `/dev/serial/by-id/...` path so the device name does not shift across reboots.
 - Subscribes to the Meshtastic pubsub events and routes them to a logger, the GUI, and the automation dispatcher inside a single process. No MQTT, no bridging.
 - Logs every packet to SQLite in WAL mode with batched commits, stores the raw JSON alongside parsed columns, and dedups rebroadcasts on `(packet_id, from_id)`.
-- Shows a touch-friendly Tkinter UI with a glance screen, a messages view with channel/DM tags and a channel selector, a simple offline scatter map of positioned nodes, and large canned-message buttons.
+- Shows a touch-friendly Tkinter UI with a Glance tab (mesh stats and our-node stats including battery, uptime, position age, and a broadcast-position button), a Messages tab with channel/DM tags, a channel selector, a destination picker for DMs, and large canned-message buttons, and a Map tab with a scale picker (1/10/25 mi, Full extent).
 - Runs automations (auto-reply on keywords, quiet-node alert) loaded from config.
 - Includes an application-level watchdog that reconnects on silence and exits non-zero on hard failure so systemd restarts the service cleanly.
 - Optionally syncs SQLite rows to PostGIS through a separate script you run from a timer.
@@ -32,11 +32,14 @@ meshpi/
       quiet_alert.py
     app.py               # wires interface, logger, gui, automations
   scripts/
+    pi_setup.sh             # one-shot Pi setup helper
+    backup_sqlite.sh        # online .backup wrapper
     postgis_sync.py
   systemd/
     meshpi.service
     meshpi-backlight-day.{service,timer}
     meshpi-backlight-night.{service,timer}
+    meshpi-backup.{service,timer}
     meshpi-postgis-sync.{service,timer}
   config.example.toml
   requirements.txt             # core deps with loose ranges
@@ -204,7 +207,22 @@ Edit the times in the two `.timer` files and the brightness values in the two `.
 
 The `Kbd` button in the Messages tab launches the first available of: `wvkbd-mobintl`, `matchbox-keyboard`, `onboard`, `florence`. Press the button again to dismiss.
 
-### 9. PostGIS sync (optional)
+### 9. Daily SQLite backup (optional but recommended)
+
+Backups land in `/mnt/meshpi-data/backups/meshpi-YYYY-MM-DD.db` using SQLite's online `.backup` command, which is safe to run while meshpi is writing. Copies older than 30 days are pruned. Override `DB_PATH`, `BACKUP_DIR`, or `RETENTION_DAYS` via environment variables on the unit if you want different paths or retention.
+
+```bash
+sudo apt install -y sqlite3                                   # if not already installed
+sudo cp systemd/meshpi-backup.service /etc/systemd/system/
+sudo cp systemd/meshpi-backup.timer   /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now meshpi-backup.timer
+systemctl list-timers meshpi-backup.timer --no-pager           # confirm next run
+```
+
+To run a backup on demand: `sudo systemctl start meshpi-backup` or just `bash scripts/backup_sqlite.sh` from the repo root.
+
+### 10. PostGIS sync (optional)
 
 PostGIS sync is off by default. The core appliance does not need `psycopg`, so it is not in `requirements.txt`. To enable the sync, install the optional dependency on top of the base set:
 
@@ -308,6 +326,16 @@ journalctl -u meshpi -n 50
 ```
 
 If it will not start, check the last failure reason with `sudo systemctl status meshpi -l` and the most recent error logs with `journalctl -u meshpi -p err -n 50`. The watchdog and the SQLite logger both record what they did before exit.
+
+## GUI overview
+
+The touchscreen app has three tabs.
+
+**Glance.** Two-column header: left side has mesh stats (nodes heard, last message, farthest contact today, today's per-channel message counts, local time); right side has our-node stats (battery, uptime, current position, time since our last position broadcast) and a `Broadcast position now` button that asks the node to retransmit its position immediately (useful after moving the node or changing fixed_position). Below the header is a compact nodes table sorted by last-heard.
+
+**Messages.** Recent text messages with a tag prefix per message: `[ch:0 default]` for broadcasts on a channel, or `[DM→us]` / `[DM→<hex>]` for direct messages. Below the message list, a `Channel:` dropdown picks the channel for outgoing sends, a `To:` dropdown picks the destination (default `Broadcast`, or a specific node for a DM), then a freeform entry, a `Kbd` toggle for the on-screen keyboard, and a `Send` button. Below that, large canned-message buttons drawn from `gui.canned_messages` in `config.toml`.
+
+**Map.** Offline scatter map with a `Scale:` row picking 1 mi / 10 mi / 25 mi / Full extent. The fixed scales center on our position and clip nodes outside the bbox so a single distant node can't squash the local view. A scale bar in the lower-left shows the current map scale. Each node is a dot colored by SNR (green/yellow/orange/gray); thin lines from "us" to each visible neighbor make the topology obvious.
 
 ## Configuration reference
 

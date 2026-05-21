@@ -1,0 +1,10 @@
+[Unit]
+Description=meshpi: daily SQLite backup
+
+[Service]
+Type=oneshot
+User=mbromley
+Group=mbromley
+WorkingDirectory=/home/mbromley/meshpi
+# Override DB_PATH / BACKUP_DIR / RETENTION_DAYS by adding Environment= lines.
+ExecStart=/bin/bash /home/mbromley/meshpi/scripts/backup_sqlite.sh

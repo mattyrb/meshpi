@@ -312,3 +312,22 @@ class SqliteLogger:
             )
             cols = [c[0] for c in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def channel_message_counts_today(self) -> dict[int, int]:
+        """Return {channel_idx: count} of text packets logged today (UTC)."""
+        if self._conn is None:
+            return {}
+        today_utc = datetime.now(timezone.utc).date().isoformat()
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT COALESCE(channel, 0) AS ch, COUNT(*) AS n
+                  FROM packets
+                 WHERE text IS NOT NULL
+                   AND substr(rx_time_utc, 1, 10) = ?
+                 GROUP BY ch
+                 ORDER BY ch
+                """,
+                (today_utc,),
+            )
+            return {int(row[0]): int(row[1]) for row in cur.fetchall()}

@@ -186,6 +186,25 @@ class InterfaceManager:
             log.info("send_text dest=%s ch=%s text=%r", destination, channel, text)
             self._iface.sendText(**kwargs)
 
+    def send_position(self) -> None:
+        """Broadcast our current position now.
+
+        Uses the position the node already knows (fixed_position config, or
+        a GPS fix). Useful as a manual 'I'm here' broadcast after moving
+        the node or changing the fixed position.
+        """
+        with self._send_lock:
+            if self._iface is None:
+                raise RuntimeError("interface not connected")
+            send_pos = getattr(self._iface, "sendPosition", None)
+            if send_pos is None:
+                raise RuntimeError(
+                    "meshtastic library does not expose sendPosition; "
+                    "upgrade or rebroadcast via the CLI"
+                )
+            log.info("send_position requested")
+            send_pos()
+
     # ----- introspection -----
 
     def my_node_info(self) -> dict[str, Any] | None:
@@ -198,6 +217,38 @@ class InterfaceManager:
             except Exception:  # noqa: BLE001
                 log.debug("getMyNodeInfo failed", exc_info=True)
                 return None
+
+    def my_node_stats(self) -> dict[str, Any]:
+        """Compact summary of our own node for the Glance tab.
+
+        Keys (all optional; missing fields are None):
+          battery_level: int (0..100)
+          uptime_seconds: int
+          position_age_seconds: float  -- seconds since our last position update
+          latitude, longitude: floats
+        """
+        out: dict[str, Any] = {
+            "battery_level": None,
+            "uptime_seconds": None,
+            "position_age_seconds": None,
+            "latitude": None,
+            "longitude": None,
+        }
+        info = self.my_node_info() or {}
+        dm = info.get("deviceMetrics") or {}
+        pos = info.get("position") or {}
+        out["battery_level"] = dm.get("batteryLevel")
+        out["uptime_seconds"] = dm.get("uptimeSeconds")
+        out["latitude"] = pos.get("latitude")
+        out["longitude"] = pos.get("longitude")
+        # Position time is a unix timestamp when present.
+        pos_time = pos.get("time")
+        if pos_time:
+            try:
+                out["position_age_seconds"] = max(0.0, time.time() - float(pos_time))
+            except (TypeError, ValueError):
+                pass
+        return out
 
     def nodes(self) -> dict[str, dict[str, Any]]:
         """Return the current nodes-db keyed by node id."""

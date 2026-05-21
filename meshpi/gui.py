@@ -112,6 +112,28 @@ def _bbox_with_padding(
             lon_min - lon_pad, lon_max + lon_pad)
 
 
+def _fmt_duration(seconds: float | int | None) -> str:
+    """Compact human-friendly duration: '3d 12h', '4h 7m', '8m 12s', '14s'."""
+    if seconds is None:
+        return "?"
+    try:
+        s = int(float(seconds))
+    except (TypeError, ValueError):
+        return "?"
+    if s < 0:
+        s = 0
+    days, rem = divmod(s, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
 def _color_for_snr(snr: float | None) -> str:
     """Three-bucket color ramp: strong green, fair yellow, weak orange, unknown gray."""
     if snr is None:
@@ -146,6 +168,9 @@ class MessagingGui:
         my_position_provider: Callable[[], tuple[float | None, float | None]],
         channels_provider: Callable[[], list[tuple[int, str]]] | None = None,
         my_node_id_provider: Callable[[], str | None] | None = None,
+        my_node_stats_provider: Callable[[], dict[str, Any]] | None = None,
+        send_position: Callable[[], None] | None = None,
+        channel_counts_provider: Callable[[], dict[int, int]] | None = None,
         fullscreen: bool = True,
         display_timezone: str = "UTC",
     ):
@@ -156,6 +181,9 @@ class MessagingGui:
         self._my_position = my_position_provider
         self._channels_provider = channels_provider or (lambda: [(0, "default")])
         self._my_node_id_provider = my_node_id_provider or (lambda: None)
+        self._my_node_stats_provider = my_node_stats_provider or (lambda: {})
+        self._send_position = send_position
+        self._channel_counts_provider = channel_counts_provider or (lambda: {})
         self._fullscreen = fullscreen
         self._tz = ZoneInfo(display_timezone) if display_timezone else timezone.utc
 
@@ -176,6 +204,13 @@ class MessagingGui:
         self._channel_combo: ttk.Combobox | None = None
         # [(index, "name (ch:N)"), ...] kept in sync with the provider.
         self._channel_options: list[tuple[int, str]] = []
+
+        # DM destination picker state. "Broadcast" is always first; other
+        # entries are populated from the SQLite nodes table.
+        self._dest_var: tk.StringVar | None = None
+        self._dest_combo: ttk.Combobox | None = None
+        # [(node_id_or_None, "display label"), ...].
+        self._dest_options: list[tuple[str | None, str]] = []
 
         # Map tab state.
         self._map_canvas: tk.Canvas | None = None
@@ -313,28 +348,62 @@ class MessagingGui:
     def _build_glance_tab(self) -> ttk.Frame:
         assert self.root is not None
         frame = ttk.Frame(self.root, padding=12)
-        ttk.Label(frame, text="meshpi status", style="Heading.TLabel").pack(
-            anchor="w", pady=(0, 8)
-        )
+
+        # Two-column header row: mesh stats left, our-node stats right.
+        header = ttk.Frame(frame)
+        header.pack(fill="x")
+        header.grid_columnconfigure(0, weight=1, uniform="cols")
+        header.grid_columnconfigure(1, weight=1, uniform="cols")
+
+        left = ttk.Frame(header)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        ttk.Label(left, text="Mesh", style="Heading.TLabel").pack(anchor="w", pady=(0, 6))
         for key, label in [
             ("nodes_heard", "Nodes heard:"),
             ("last_msg", "Last message:"),
             ("farthest_km", "Farthest today:"),
+            ("channel_summary", "Channels today:"),
             ("local_time", "Local time:"),
         ]:
-            row = ttk.Frame(frame)
-            row.pack(fill="x", pady=4)
+            row = ttk.Frame(left)
+            row.pack(fill="x", pady=2)
             ttk.Label(row, text=label, style="Glance.TLabel", width=18).pack(side="left")
             var = tk.StringVar(value="--")
             self._glance_vars[key] = var
             ttk.Label(row, textvariable=var, style="Glance.TLabel").pack(side="left")
 
-        # Compact node table.
+        right = ttk.Frame(header)
+        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        ttk.Label(right, text="Our node", style="Heading.TLabel").pack(anchor="w", pady=(0, 6))
+        for key, label in [
+            ("our_battery", "Battery:"),
+            ("our_uptime", "Uptime:"),
+            ("our_position", "Position:"),
+            ("our_position_age", "Position age:"),
+        ]:
+            row = ttk.Frame(right)
+            row.pack(fill="x", pady=2)
+            ttk.Label(row, text=label, style="Glance.TLabel", width=14).pack(side="left")
+            var = tk.StringVar(value="--")
+            self._glance_vars[key] = var
+            ttk.Label(row, textvariable=var, style="Glance.TLabel").pack(side="left")
+        # Broadcast button. Disabled when send_position was not wired.
+        btn_state = "normal" if self._send_position is not None else "disabled"
+        self._broadcast_btn = ttk.Button(
+            right,
+            text="Broadcast position now",
+            style="Big.TButton",
+            state=btn_state,
+            command=self._on_broadcast_position,
+        )
+        self._broadcast_btn.pack(anchor="w", pady=(8, 0))
+
+        # Compact node table below the two columns.
         ttk.Label(frame, text="Nodes", style="Heading.TLabel").pack(
-            anchor="w", pady=(16, 4)
+            anchor="w", pady=(12, 4)
         )
         cols = ("name", "last_heard", "battery", "snr")
-        tree = ttk.Treeview(frame, columns=cols, show="headings", height=8)
+        tree = ttk.Treeview(frame, columns=cols, show="headings", height=6)
         for col, label, w in [
             ("name", "Name", 220),
             ("last_heard", "Last heard", 180),
@@ -346,6 +415,17 @@ class MessagingGui:
         tree.pack(fill="both", expand=True)
         self._nodes_tree = tree
         return frame
+
+    def _on_broadcast_position(self) -> None:
+        if self._send_position is None:
+            self._set_notice("broadcast unavailable: send_position not wired")
+            return
+        try:
+            self._send_position()
+            self._set_notice("position broadcast requested")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("send_position failed")
+            self._set_notice(f"broadcast failed: {exc}")
 
     def _build_messages_tab(self) -> ttk.Frame:
         assert self.root is not None
@@ -391,20 +471,33 @@ class MessagingGui:
             compose, text="Send", style="Big.TButton", command=self._on_send_pressed
         ).pack(side="right")
 
-        # Channel selector row (above the compose row).
+        # Channel + destination row (above the compose row).
         chrow = ttk.Frame(frame)
         chrow.pack(side="bottom", fill="x", pady=(8, 0))
+
         ttk.Label(chrow, text="Channel:", style="Glance.TLabel").pack(side="left")
         self._channel_var = tk.StringVar()
         self._channel_combo = ttk.Combobox(
             chrow,
             textvariable=self._channel_var,
             state="readonly",
+            width=18,
+            font=("DejaVu Sans", 14),
+        )
+        self._channel_combo.pack(side="left", padx=(6, 12))
+        self._refresh_channels()
+
+        ttk.Label(chrow, text="To:", style="Glance.TLabel").pack(side="left")
+        self._dest_var = tk.StringVar()
+        self._dest_combo = ttk.Combobox(
+            chrow,
+            textvariable=self._dest_var,
+            state="readonly",
             width=24,
             font=("DejaVu Sans", 14),
         )
-        self._channel_combo.pack(side="left", padx=(8, 0))
-        self._refresh_channels()
+        self._dest_combo.pack(side="left", padx=(6, 0))
+        self._refresh_destinations()
 
         # Recent messages text box (top, takes remaining height).
         top = ttk.Frame(frame)
@@ -510,9 +603,16 @@ class MessagingGui:
     def _send_safe(self, text: str) -> None:
         ch_idx = self._selected_channel_index()
         ch_label = self._selected_channel_label()
+        dest_id, dest_label = self._selected_destination()
         try:
-            self._send_text(text, channel=ch_idx)
-            self._set_notice(f"sent on {ch_label}: {text}")
+            if dest_id:
+                # DM: send to a specific node; channel index is still
+                # meaningful for which key/PSK encrypts the packet.
+                self._send_text(text, destination=dest_id, channel=ch_idx)
+                self._set_notice(f"DM to {dest_label} on {ch_label}: {text}")
+            else:
+                self._send_text(text, channel=ch_idx)
+                self._set_notice(f"sent on {ch_label}: {text}")
         except Exception as exc:  # noqa: BLE001
             log.exception("send failed")
             self._set_notice(f"send failed: {exc}")
@@ -554,6 +654,51 @@ class MessagingGui:
         if current not in labels and labels:
             self._channel_var.set(labels[0])
 
+    def _refresh_destinations(self) -> None:
+        """Rebuild the To: dropdown from the SQLite nodes table.
+
+        First entry is always 'Broadcast' (None). Others are nodes sorted
+        by last-heard, displayed as 'Long Name (!hex_id)'. Limited to the
+        50 most-recently-heard so the dropdown stays usable.
+        """
+        if self._dest_combo is None or self._dest_var is None:
+            return
+        options: list[tuple[str | None, str]] = [(None, "Broadcast")]
+        try:
+            nodes = self._nodes() or []
+        except Exception:  # noqa: BLE001
+            nodes = []
+        my_id = self._my_node_id_provider()
+        for n in nodes[:50]:
+            nid = n.get("node_id")
+            if not nid or (my_id and nid.lower() == my_id.lower()):
+                continue
+            name = (
+                n.get("long_name")
+                or n.get("short_name")
+                or nid
+            )
+            options.append((nid, f"{name} ({nid})"))
+
+        if options == self._dest_options:
+            return
+        self._dest_options = options
+        labels = [lbl for _id, lbl in options]
+        self._dest_combo["values"] = labels
+        current = self._dest_var.get()
+        if current not in labels:
+            self._dest_var.set(labels[0])  # default to Broadcast
+
+    def _selected_destination(self) -> tuple[str | None, str]:
+        """Return (node_id_or_None, display_label) for the current selection."""
+        if not self._dest_var or not self._dest_options:
+            return None, "Broadcast"
+        label = self._dest_var.get()
+        for node_id, lbl in self._dest_options:
+            if lbl == label:
+                return node_id, label
+        return None, "Broadcast"
+
     # ----- event drain and refresh -----
 
     def _drain_events(self) -> None:
@@ -569,9 +714,13 @@ class MessagingGui:
                     self._refresh_messages()
                     self._refresh_glance()
                     self._refresh_map()
+                    if event_type == "node":
+                        # New node could be a new DM destination.
+                        self._refresh_destinations()
                     if event_type == "connected":
                         # Channels are populated after connect; refresh dropdown.
                         self._refresh_channels()
+                        self._refresh_destinations()
                         self._set_notice("interface connected")
                     elif event_type == "disconnected":
                         self._set_notice("interface disconnected")
@@ -584,6 +733,7 @@ class MessagingGui:
             return
         self._refresh_glance()
         self._refresh_channels()
+        self._refresh_destinations()
         self._refresh_map()
         self.root.after(15000, self._periodic_refresh)
 
@@ -643,9 +793,13 @@ class MessagingGui:
         self._glance_vars["farthest_km"].set(
             self._farthest_today_label(nodes, my_lat, my_lon)
         )
+        self._glance_vars["channel_summary"].set(self._channel_summary_label())
         self._glance_vars["local_time"].set(
             datetime.now(self._tz).strftime("%Y-%m-%d %H:%M %Z")
         )
+
+        # Our-node block.
+        self._refresh_our_node_stats(my_lat, my_lon)
 
         # Refresh nodes treeview.
         tree = getattr(self, "_nodes_tree", None)
@@ -663,6 +817,52 @@ class MessagingGui:
                         f"{n['snr']:.1f}" if n.get("snr") is not None else "",
                     ),
                 )
+
+    def _refresh_our_node_stats(
+        self, my_lat: float | None, my_lon: float | None,
+    ) -> None:
+        """Populate the right-hand 'Our node' column."""
+        try:
+            stats = self._my_node_stats_provider() or {}
+        except Exception:  # noqa: BLE001
+            log.exception("my_node_stats_provider failed")
+            stats = {}
+
+        batt = stats.get("battery_level")
+        self._glance_vars["our_battery"].set(
+            f"{int(batt)}%" if isinstance(batt, (int, float)) else "?"
+        )
+
+        uptime = stats.get("uptime_seconds")
+        self._glance_vars["our_uptime"].set(
+            _fmt_duration(uptime) if uptime else "?"
+        )
+
+        if my_lat is not None and my_lon is not None:
+            self._glance_vars["our_position"].set(f"{my_lat:.5f}, {my_lon:.5f}")
+        else:
+            self._glance_vars["our_position"].set("(not set)")
+
+        age = stats.get("position_age_seconds")
+        self._glance_vars["our_position_age"].set(
+            f"{_fmt_duration(age)} ago" if isinstance(age, (int, float)) else "?"
+        )
+
+    def _channel_summary_label(self) -> str:
+        """Compose a one-line summary like 'default(0): 142  Mountain(1): 7'."""
+        try:
+            counts = self._channel_counts_provider() or {}
+        except Exception:  # noqa: BLE001
+            counts = {}
+        if not counts:
+            return "(none today)"
+        # Map indices to friendly names.
+        name_by_idx = {idx: name for idx, name in (self._channels_provider() or [])}
+        parts: list[str] = []
+        for idx in sorted(counts):
+            name = name_by_idx.get(idx, f"ch{idx}")
+            parts.append(f"{name}({idx}):{counts[idx]}")
+        return "  ".join(parts)
 
     def _farthest_today_label(
         self,

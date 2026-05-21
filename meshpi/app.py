@@ -243,6 +243,9 @@ class App:
             my_position_provider=self._my_position,
             channels_provider=self.iface.channels,
             my_node_id_provider=self.iface.my_node_id,
+            my_node_stats_provider=self.iface.my_node_stats,
+            send_position=self.iface.send_position,
+            channel_counts_provider=self.sqlite.channel_message_counts_today,
             fullscreen=self.cfg.gui.fullscreen,
             display_timezone=self.cfg.gui.display_timezone,
         )
