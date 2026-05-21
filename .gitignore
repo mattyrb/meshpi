@@ -9,13 +9,17 @@ __pycache__/
 venv/
 env/
 
-# Local config and data
+# Local config (commit only the example)
 config.toml
+
+# SQLite database and WAL/SHM sidecars
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
-*.db
-*.db-journal
 
 # Editor / OS
 .vscode/
@@ -25,3 +29,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Note: requirements.lock.txt IS tracked. Commit it after a clean install
+# so future installs on the same Python version are reproducible.

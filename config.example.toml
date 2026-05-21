@@ -9,9 +9,9 @@ baud = 115200
 
 [database]
 # Default to a mounted USB stick on the Pi to spare the SD card from write wear.
-# On the Pi, mount your stick at /mnt/meshpi-data and point here.
+# On the Pi, format the stick ext4 and mount at /mnt/meshpi-data (see README).
 # During dev on Mac/Windows just use a local path.
-path = "/mnt/meshpi-data/meshpi.sqlite"
+path = "/mnt/meshpi-data/meshpi.db"
 # Batch commit thresholds: flush whichever comes first.
 batch_size = 50
 batch_seconds = 5.0

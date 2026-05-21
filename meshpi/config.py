@@ -1,8 +1,9 @@
 """Configuration loader for meshpi.
 
-Reads a TOML file with tomllib (stdlib in Python 3.11+) and returns typed
-dataclasses for each section. Designed so the same code runs on Windows
-during development (COM port serial) and on the Pi (by-id serial path).
+Reads a TOML file with tomllib (stdlib in Python 3.11+; deployment target
+is Python 3.13 on the Pi) and returns typed dataclasses for each section.
+Designed so the same code runs on Windows during development (COM port
+serial) and on the Pi (by-id serial path).
 """
 
 from __future__ import annotations

@@ -1,0 +1,10 @@
+# Optional dependency for scripts/postgis_sync.py only.
+# The always-on meshpi appliance does not need this to run.
+#
+# Install on top of the base requirements when enabling the PostGIS sync:
+#     pip install -r requirements-postgis.txt
+#
+# psycopg 3.2.x is the floor with 3.13 wheels; the previously pinned 3.1.18
+# had no 3.13 wheel and would fail to build on the Pi.
+
+psycopg[binary]>=3.2

@@ -2,7 +2,7 @@
 
 A single Python service that turns a Raspberry Pi 3 with a built-in touchscreen into a dedicated, always-on Meshtastic node and messaging terminal. One process owns the USB serial connection, logs every mesh packet to SQLite, drives a Tkinter touch GUI, and runs pluggable automations. A watchdog and systemd unit keep it alive across stalls, crashes, and reboots.
 
-This README targets a Raspberry Pi 3 running Raspberry Pi OS Bookworm 64-bit with Python 3.11. Development happens on a MacBook but every deploy command below is for the Pi.
+This README targets a Raspberry Pi 3 running Raspberry Pi OS Bookworm 64-bit with Python 3.13. Development happens on a MacBook but every deploy command below is for the Pi. The code is compatible with Python 3.11+, but 3.13 is the deployment target and the version the pinned dependency ranges are validated against.
 
 ## What it does
 
@@ -39,7 +39,9 @@ meshpi/
     meshpi-backlight-night.{service,timer}
     meshpi-postgis-sync.{service,timer}
   config.example.toml
-  requirements.txt
+  requirements.txt             # core deps with loose ranges
+  requirements-postgis.txt     # optional psycopg for the sync script
+  requirements.lock.txt        # commit after a clean install for reproducibility
   .gitignore
   README.md
 ```
@@ -61,6 +63,24 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
+
+**Confirm a clean install.** Successful pip runs end with a `Successfully installed ...` line that lists every package. If dependency resolution fails, pip installs nothing, even packages it already "Collected," and the failure surfaces later as `ModuleNotFoundError` (for example `No module named 'pubsub'`). Always read for the success line before running the app.
+
+If a lock file is committed in the repo, prefer it for reproducible installs on the same Python version:
+
+```bash
+pip install -r requirements.lock.txt
+```
+
+After a clean install on a fresh Pi, regenerate and commit the lock:
+
+```bash
+pip freeze > requirements.lock.txt
+git add requirements.lock.txt
+git commit -m "Refresh lock for Python 3.13"
+```
+
+`requirements.txt` keeps loose version ranges so pip can pick wheels that match the running Python; the lock file pins the exact set that resolved cleanly.
 
 ### 3. Find the node by-id path
 
@@ -84,7 +104,35 @@ sudo usermod -aG dialout $USER
 
 Log out and back in for the group change to take effect.
 
-### 4. Configure
+### 4. Format and mount a USB data drive (ext4)
+
+The SQLite database lives on a USB stick, not the SD card, to spare the card from write wear. The filesystem is ext4. ext4 cannot be created from Windows or macOS, so format the drive on the Pi:
+
+```bash
+lsblk -f                                   # identify the USB drive (e.g. /dev/sda1); the SD card is mmcblk0
+sudo umount /dev/sda1                      # if auto-mounted
+sudo mkfs.ext4 -L meshpi-data /dev/sda1    # erases the drive
+sudo blkid /dev/sda1                       # note the UUID
+sudo mkdir -p /mnt/meshpi-data
+```
+
+Add a UUID-based `/etc/fstab` entry so the drive auto-mounts at boot:
+
+```
+UUID=<your-uuid>  /mnt/meshpi-data  ext4  defaults,noatime,nofail  0  2
+```
+
+`noatime` cuts needless writes. `nofail` lets the Pi boot if the drive is absent.
+
+Mount and hand ownership to the user that runs the service so the logger can write:
+
+```bash
+sudo mount -a
+sudo chown -R pi:pi /mnt/meshpi-data       # match your service User=, default is pi
+ls -ld /mnt/meshpi-data
+```
+
+### 5. Configure
 
 ```bash
 cp config.example.toml config.toml
@@ -93,12 +141,12 @@ nano config.toml
 
 At a minimum set:
 
-- `serial.device` to the by-id path you just found.
-- `database.path` to a location on a mounted USB stick, for example `/mnt/meshpi-data/meshpi.sqlite`. Keeping the database off the SD card spares the card from write wear.
+- `serial.device` to the by-id path you found in step 3.
+- `database.path` to the USB drive, default `/mnt/meshpi-data/meshpi.db`.
 - `gui.canned_messages` to taste.
 - `backlight.path` to whatever `ls /sys/class/backlight/` shows on your display. Common candidates are `/sys/class/backlight/rpi_backlight/brightness` and `/sys/class/backlight/10-0045/brightness`. Some HDMI+USB touch panels expose no sysfs backlight at all, in which case skip the backlight timers.
 
-### 5. Foreground test run
+### 6. Foreground test run
 
 ```bash
 python -m meshpi.app
@@ -106,7 +154,7 @@ python -m meshpi.app
 
 Watch the console for `Meshtastic connection established`, then send a test message from another node. Hit Ctrl-C to stop.
 
-### 6. Install the systemd service
+### 7. Install the systemd service
 
 ```bash
 sudo cp systemd/meshpi.service /etc/systemd/system/
@@ -119,7 +167,7 @@ If your user is not `pi` or the repo lives somewhere other than `/home/pi/meshpi
 
 The unit uses `WantedBy=graphical.target` and a `DISPLAY=:0` environment so the Tk GUI can draw on the autologin desktop session. If you run a headless setup or a different display server, adjust accordingly.
 
-### 7. Backlight schedule (optional)
+### 8. Backlight schedule (optional)
 
 ```bash
 sudo cp systemd/meshpi-backlight-*.service /etc/systemd/system/
@@ -130,9 +178,16 @@ sudo systemctl enable --now meshpi-backlight-day.timer meshpi-backlight-night.ti
 
 Edit the `ExecStart` paths and values in the two `.service` files to match your sysfs path and brightness levels.
 
-### 8. PostGIS sync (optional)
+### 9. PostGIS sync (optional)
 
-PostGIS sync is off by default. Set `[postgis] enabled = true` in `config.toml` and provide a libpq `dsn`. Create the destination table once with the DDL inlined at the top of `scripts/postgis_sync.py`. Then either run on demand:
+PostGIS sync is off by default. The core appliance does not need `psycopg`, so it is not in `requirements.txt`. To enable the sync, install the optional dependency on top of the base set:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements-postgis.txt
+```
+
+Then set `[postgis] enabled = true` in `config.toml` and provide a libpq `dsn`. Create the destination table once with the DDL inlined at the top of `scripts/postgis_sync.py`. Run on demand:
 
 ```bash
 .venv/bin/python scripts/postgis_sync.py
@@ -159,11 +214,18 @@ sudo systemctl restart meshpi
 journalctl -u meshpi -f
 ```
 
-If you changed `requirements.txt`, also run:
+If you changed `requirements.txt` or `requirements.lock.txt`, also run (in the activated venv):
 
 ```bash
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.lock.txt   # or requirements.txt
+```
+
+If you bumped a dependency range and pip resolved a new set, regenerate the lock and commit it from the Pi:
+
+```bash
+pip freeze > requirements.lock.txt
+git add requirements.lock.txt && git commit -m "Refresh lock" && git push
 ```
 
 ## Configuration reference

@@ -1,7 +1,27 @@
-# Pinned for Pi 3 / Bookworm / Python 3.11
-meshtastic==2.3.13
-pypubsub==4.0.3
-pyserial==3.5
+# Core runtime for meshpi on Python 3.13 (Raspberry Pi OS Bookworm 64-bit).
+#
+# Loose ranges by design. Tight pins broke on 3.13 during first deployment
+# because the older meshtastic/psycopg snapshots had no 3.13 wheels. After a
+# clean install on a target Pi, freeze the resolved set:
+#
+#     pip freeze > requirements.lock.txt
+#
+# and commit the lock file. Use the lock for reproducible installs on the
+# same Python version; use this file when you want pip to resolve fresh.
+#
+# IMPORTANT: confirm a successful install. pip ends a successful run with
+# a "Successfully installed ..." line. If resolution fails, pip installs
+# nothing even from packages it already "Collected," which later surfaces
+# as ModuleNotFoundError (for example: No module named 'pubsub').
 
-# Optional: PostGIS sync script only. Comment out if not used.
-psycopg[binary]==3.1.18
+meshtastic>=2.5.3,<3
+
+# pypubsub provides the `pubsub` module that the meshtastic library imports.
+# Listed explicitly so a partial install cannot drop it.
+pypubsub>=4.0.3
+
+pyserial>=3.5
+
+# psycopg is intentionally NOT here. It is only needed for the optional
+# PostGIS sync script. Install it separately when enabling that feature:
+#     pip install -r requirements-postgis.txt
