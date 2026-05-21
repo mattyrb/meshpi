@@ -351,55 +351,16 @@ class MessagingGui:
         assert self.root is not None
         frame = ttk.Frame(self.root, padding=8)
 
-        # Recent messages text box.
-        top = ttk.Frame(frame)
-        top.pack(fill="both", expand=True)
-        self._messages_text = tk.Text(
-            top, wrap="word", height=14, font=("DejaVu Sans Mono", 11)
-        )
-        self._messages_text.configure(state="disabled")
-        scroll = ttk.Scrollbar(top, command=self._messages_text.yview)
-        self._messages_text.configure(yscrollcommand=scroll.set)
-        self._messages_text.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        # IMPORTANT: pack the bottom controls FIRST so they reserve their
+        # natural height. Then pack the messages-text frame last with
+        # expand=True so it claims whatever vertical space is left over.
+        # If we packed messages-text first, it would grab all the height
+        # and push the compose / canned rows off the bottom of the screen
+        # on the 800x480 Pi touchscreen.
 
-        # Channel selector row. The dropdown is populated from the node's
-        # configured channels and refreshed whenever they change.
-        chrow = ttk.Frame(frame)
-        chrow.pack(fill="x", pady=(8, 0))
-        ttk.Label(chrow, text="Channel:", style="Glance.TLabel").pack(side="left")
-        self._channel_var = tk.StringVar()
-        self._channel_combo = ttk.Combobox(
-            chrow,
-            textvariable=self._channel_var,
-            state="readonly",
-            width=24,
-            font=("DejaVu Sans", 14),
-        )
-        self._channel_combo.pack(side="left", padx=(8, 0))
-        self._refresh_channels()
-
-        # Compose row.
-        compose = ttk.Frame(frame)
-        compose.pack(fill="x", pady=(8, 6))
-        self._compose_var = tk.StringVar()
-        entry = ttk.Entry(compose, textvariable=self._compose_var, font=("DejaVu Sans", 16))
-        entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        # Virtual keyboard toggle. Off by default; useful when typing freeform
-        # messages on the touchscreen. Hidden if no on-screen keyboard is
-        # available; press again to dismiss.
-        self._kb_button = ttk.Button(
-            compose, text="Kbd", style="Big.TButton",
-            command=self._toggle_keyboard,
-        )
-        self._kb_button.pack(side="right", padx=(0, 6))
-        ttk.Button(
-            compose, text="Send", style="Big.TButton", command=self._on_send_pressed
-        ).pack(side="right")
-
-        # Canned message grid; chunk into rows of 3 for touch targets.
+        # Canned message grid (bottom-most). Chunk into rows of 3 for touch.
         canned = ttk.Frame(frame)
-        canned.pack(fill="x", pady=(4, 0))
+        canned.pack(side="bottom", fill="x", pady=(4, 0))
         per_row = 3
         for idx, text in enumerate(self._canned):
             r, c = divmod(idx, per_row)
@@ -412,6 +373,50 @@ class MessagingGui:
             btn.grid(row=r, column=c, sticky="nsew", padx=4, pady=4)
         for c in range(per_row):
             canned.grid_columnconfigure(c, weight=1)
+
+        # Compose row (above the canned grid).
+        compose = ttk.Frame(frame)
+        compose.pack(side="bottom", fill="x", pady=(8, 6))
+        self._compose_var = tk.StringVar()
+        entry = ttk.Entry(compose, textvariable=self._compose_var, font=("DejaVu Sans", 16))
+        entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        # Virtual keyboard toggle. Off by default; useful when typing
+        # freeform messages on the touchscreen. Press again to dismiss.
+        self._kb_button = ttk.Button(
+            compose, text="Kbd", style="Big.TButton",
+            command=self._toggle_keyboard,
+        )
+        self._kb_button.pack(side="right", padx=(0, 6))
+        ttk.Button(
+            compose, text="Send", style="Big.TButton", command=self._on_send_pressed
+        ).pack(side="right")
+
+        # Channel selector row (above the compose row).
+        chrow = ttk.Frame(frame)
+        chrow.pack(side="bottom", fill="x", pady=(8, 0))
+        ttk.Label(chrow, text="Channel:", style="Glance.TLabel").pack(side="left")
+        self._channel_var = tk.StringVar()
+        self._channel_combo = ttk.Combobox(
+            chrow,
+            textvariable=self._channel_var,
+            state="readonly",
+            width=24,
+            font=("DejaVu Sans", 14),
+        )
+        self._channel_combo.pack(side="left", padx=(8, 0))
+        self._refresh_channels()
+
+        # Recent messages text box (top, takes remaining height).
+        top = ttk.Frame(frame)
+        top.pack(side="top", fill="both", expand=True)
+        self._messages_text = tk.Text(
+            top, wrap="word", height=8, font=("DejaVu Sans Mono", 11)
+        )
+        self._messages_text.configure(state="disabled")
+        scroll = ttk.Scrollbar(top, command=self._messages_text.yview)
+        self._messages_text.configure(yscrollcommand=scroll.set)
+        self._messages_text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
 
         return frame
 
