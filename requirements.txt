@@ -1,0 +1,7 @@
+# Pinned for Pi 3 / Bookworm / Python 3.11
+meshtastic==2.3.13
+pypubsub==4.0.3
+pyserial==3.5
+
+# Optional: PostGIS sync script only. Comment out if not used.
+psycopg[binary]==3.1.18

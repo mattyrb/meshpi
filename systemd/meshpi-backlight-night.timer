@@ -1,0 +1,9 @@
+[Unit]
+Description=meshpi: blank backlight at 22:00 local time
+
+[Timer]
+OnCalendar=*-*-* 22:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

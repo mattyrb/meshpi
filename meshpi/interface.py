@@ -1,0 +1,222 @@
+"""Single owner of the serial connection to the Meshtastic node.
+
+Only one process can hold the serial port, so this module is the one place
+in meshpi that touches the meshtastic library directly. Everything else
+(GUI, logger, automations) consumes events through callbacks registered
+with InterfaceManager.subscribe(...) and sends through .send_text(...).
+
+Threading notes:
+- The meshtastic library dispatches events via pubsub on background threads.
+- We re-publish those events to our own callbacks while still on those threads.
+- Consumers that are not thread-safe (Tk) must drain via a queue inside their
+  own callback. The GUI does this; the logger and automations are written
+  to be safe to call from any thread.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+from pubsub import pub
+
+# Import lazily to keep the module importable on machines without the
+# meshtastic package installed (e.g. CI lint).
+try:
+    import meshtastic
+    import meshtastic.serial_interface as msi
+except ImportError:  # pragma: no cover
+    meshtastic = None  # type: ignore[assignment]
+    msi = None  # type: ignore[assignment]
+
+log = logging.getLogger(__name__)
+
+# Pubsub topic names from the meshtastic library.
+TOPIC_RECEIVE = "meshtastic.receive"  # all packets
+TOPIC_TEXT = "meshtastic.receive.text"
+TOPIC_POSITION = "meshtastic.receive.position"
+TOPIC_USER = "meshtastic.receive.user"
+TOPIC_NODE_UPDATED = "meshtastic.node.updated"
+TOPIC_CONNECTION_ESTABLISHED = "meshtastic.connection.established"
+TOPIC_CONNECTION_LOST = "meshtastic.connection.lost"
+
+# Event types we expose to consumers.
+EVENT_PACKET = "packet"
+EVENT_NODE = "node"
+EVENT_CONNECTED = "connected"
+EVENT_DISCONNECTED = "disconnected"
+
+Callback = Callable[[str, dict[str, Any]], None]
+
+
+@dataclass
+class InterfaceStats:
+    last_rx_time: float = 0.0  # monotonic, seconds
+    last_heartbeat_time: float = 0.0
+    connected: bool = False
+
+
+class InterfaceManager:
+    """Owns the serial interface and re-publishes events to local subscribers."""
+
+    def __init__(self, device: str, baud: int = 115200):
+        self.device = device
+        self.baud = baud
+        self._iface: Any | None = None
+        self._lock = threading.RLock()
+        self._send_lock = threading.Lock()
+        self._subscribers: list[Callback] = []
+        self.stats = InterfaceStats()
+        self._closed = False
+
+    # ----- lifecycle -----
+
+    def connect(self) -> None:
+        """Open the serial interface and wire pubsub."""
+        if msi is None:
+            raise RuntimeError(
+                "meshtastic package not installed; run pip install -r requirements.txt"
+            )
+        with self._lock:
+            if self._iface is not None:
+                return
+            log.info("Opening Meshtastic serial interface at %s", self.device)
+            # The library accepts devPath for explicit serial paths.
+            self._iface = msi.SerialInterface(devPath=self.device)
+            self._wire_pubsub()
+            # Consider the open itself a heartbeat.
+            self.stats.last_heartbeat_time = time.monotonic()
+
+    def close(self) -> None:
+        """Close the interface and unsubscribe."""
+        with self._lock:
+            self._closed = True
+            if self._iface is None:
+                return
+            try:
+                pub.unsubAll(topicName=TOPIC_RECEIVE)
+                pub.unsubAll(topicName=TOPIC_NODE_UPDATED)
+                pub.unsubAll(topicName=TOPIC_CONNECTION_ESTABLISHED)
+                pub.unsubAll(topicName=TOPIC_CONNECTION_LOST)
+            except Exception:  # noqa: BLE001
+                log.debug("pubsub unsubscribe error", exc_info=True)
+            try:
+                self._iface.close()
+            except Exception:  # noqa: BLE001
+                log.debug("interface close error", exc_info=True)
+            self._iface = None
+            self.stats.connected = False
+
+    def reconnect(self) -> bool:
+        """Close and reopen. Returns True on success."""
+        log.warning("Reconnecting Meshtastic interface")
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001
+            log.exception("error during close-before-reconnect")
+        # Brief pause so the kernel releases the tty.
+        time.sleep(1.0)
+        try:
+            self._closed = False
+            self.connect()
+            return True
+        except Exception:  # noqa: BLE001
+            log.exception("reconnect failed")
+            return False
+
+    # ----- pubsub plumbing -----
+
+    def _wire_pubsub(self) -> None:
+        pub.subscribe(self._on_receive, TOPIC_RECEIVE)
+        pub.subscribe(self._on_node_updated, TOPIC_NODE_UPDATED)
+        pub.subscribe(self._on_connection_established, TOPIC_CONNECTION_ESTABLISHED)
+        pub.subscribe(self._on_connection_lost, TOPIC_CONNECTION_LOST)
+
+    def _dispatch(self, event_type: str, payload: dict[str, Any]) -> None:
+        for cb in list(self._subscribers):
+            try:
+                cb(event_type, payload)
+            except Exception:  # noqa: BLE001
+                log.exception("subscriber error in %s", cb)
+
+    def _on_receive(self, packet: dict[str, Any], interface: Any) -> None:
+        self.stats.last_rx_time = time.monotonic()
+        self._dispatch(EVENT_PACKET, packet)
+
+    def _on_node_updated(self, node: dict[str, Any], interface: Any) -> None:
+        self._dispatch(EVENT_NODE, node)
+
+    def _on_connection_established(self, interface: Any, topic: Any = None) -> None:
+        log.info("Meshtastic connection established")
+        self.stats.connected = True
+        self.stats.last_heartbeat_time = time.monotonic()
+        self._dispatch(EVENT_CONNECTED, {})
+
+    def _on_connection_lost(self, interface: Any, topic: Any = None) -> None:
+        log.warning("Meshtastic connection lost")
+        self.stats.connected = False
+        self._dispatch(EVENT_DISCONNECTED, {})
+
+    # ----- consumer API -----
+
+    def subscribe(self, callback: Callback) -> None:
+        """Register a (event_type, payload) callback. Called on bg threads."""
+        self._subscribers.append(callback)
+
+    def send_text(
+        self,
+        text: str,
+        destination: str | int | None = None,
+        channel: int = 0,
+        want_ack: bool = False,
+    ) -> None:
+        """Thread-safe text send through the single interface."""
+        with self._send_lock:
+            if self._iface is None:
+                raise RuntimeError("interface not connected")
+            kwargs: dict[str, Any] = {"text": text, "channelIndex": channel}
+            if destination is not None:
+                kwargs["destinationId"] = destination
+            if want_ack:
+                kwargs["wantAck"] = True
+            log.info("send_text dest=%s ch=%s text=%r", destination, channel, text)
+            self._iface.sendText(**kwargs)
+
+    # ----- introspection -----
+
+    def my_node_info(self) -> dict[str, Any] | None:
+        """Return our own node dict, or None if not connected yet."""
+        with self._lock:
+            if self._iface is None:
+                return None
+            try:
+                return self._iface.getMyNodeInfo()
+            except Exception:  # noqa: BLE001
+                log.debug("getMyNodeInfo failed", exc_info=True)
+                return None
+
+    def nodes(self) -> dict[str, dict[str, Any]]:
+        """Return the current nodes-db keyed by node id."""
+        with self._lock:
+            if self._iface is None:
+                return {}
+            return dict(getattr(self._iface, "nodes", {}) or {})
+
+    def heartbeat(self) -> bool:
+        """Cheap liveness check used by the watchdog. Returns False on failure."""
+        with self._lock:
+            if self._iface is None:
+                return False
+            try:
+                # Touching nodes is enough to confirm the interface object
+                # is responsive; an outright protocol ping is not exposed.
+                _ = getattr(self._iface, "nodes", None)
+                self.stats.last_heartbeat_time = time.monotonic()
+                return True
+            except Exception:  # noqa: BLE001
+                log.debug("heartbeat failed", exc_info=True)
+                return False

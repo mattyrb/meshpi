@@ -1,0 +1,80 @@
+# meshpi configuration. Copy to config.toml and edit.
+# config.toml is gitignored; this example file is the one committed.
+
+[serial]
+# Linux: prefer a stable by-id path. Confirm with: ls -l /dev/serial/by-id/
+# Windows (for dev on Mac/Windows): use the COM name, e.g. "COM4".
+device = "/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0"
+baud = 115200
+
+[database]
+# Default to a mounted USB stick on the Pi to spare the SD card from write wear.
+# On the Pi, mount your stick at /mnt/meshpi-data and point here.
+# During dev on Mac/Windows just use a local path.
+path = "/mnt/meshpi-data/meshpi.sqlite"
+# Batch commit thresholds: flush whichever comes first.
+batch_size = 50
+batch_seconds = 5.0
+
+[watchdog]
+# Seconds with no received packets before we attempt a reconnect.
+# Meshtastic background traffic (heartbeats, nodeinfo) usually arrives well under 10 minutes.
+silence_seconds = 900
+# Seconds after a failed reconnect before giving up and exiting non-zero (systemd will restart).
+reconnect_grace_seconds = 60
+# Periodic poll of the interface to check it is alive.
+heartbeat_seconds = 60
+
+[gui]
+# Tkinter by default. Kept behind a thin interface so it could be swapped.
+fullscreen = true
+# Use the local time zone for display only; storage is always UTC.
+display_timezone = "America/Los_Angeles"
+# Canned message buttons, shown big for thumb taps.
+canned_messages = [
+    "check-in",
+    "OK",
+    "en route",
+    "on my way",
+    "back at base",
+]
+
+[backlight]
+# Path varies by display. Common values:
+#   Official Raspberry Pi 7" touchscreen: /sys/class/backlight/rpi_backlight/brightness
+#   Newer kernels:                        /sys/class/backlight/10-0045/brightness
+#   Some HDMI+USB touch panels expose no sysfs backlight at all.
+# Confirm with: ls /sys/class/backlight/
+path = "/sys/class/backlight/rpi_backlight/brightness"
+max_brightness_path = "/sys/class/backlight/rpi_backlight/max_brightness"
+# Schedule is enforced by a systemd timer that calls a small helper; see systemd/.
+day_brightness = 200
+night_brightness = 0
+day_start = "06:30"
+night_start = "22:00"
+
+[automations]
+# List the automation module names (under meshpi.automations) to enable.
+enabled = ["autoreply", "quiet_alert"]
+
+[automations.autoreply]
+# Words to trigger an auto-reply. Matched case-insensitive on whole-message strip.
+keywords = ["ping", "status"]
+# Optional channel restriction. Omit (or comment out) to reply on whatever
+# channel the message came in on. To force a channel, set an integer:
+# reply_channel = 0
+
+[automations.quiet_alert]
+# Friendly long_name or short_name to watch. Use the exact name from the Meshtastic app.
+node_name = "Base Station"
+# Alert if not heard for this many seconds.
+silence_seconds = 7200
+
+[postgis]
+# Optional. Off by default. Run scripts/postgis_sync.py from cron or a systemd timer.
+enabled = false
+# libpq connection string. Use ~/.pgpass or env vars for the password in production.
+dsn = "host=localhost dbname=meshpi user=meshpi"
+table = "meshpi.packets"
+# Sync no more than this many rows per run.
+batch_size = 5000

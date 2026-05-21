@@ -1,0 +1,13 @@
+[Unit]
+Description=meshpi: optional PostGIS sync run
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/meshpi
+Environment=PYTHONUNBUFFERED=1
+Environment=MESHPI_CONFIG=/home/pi/meshpi/config.toml
+ExecStart=/home/pi/meshpi/.venv/bin/python scripts/postgis_sync.py

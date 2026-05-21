@@ -1,0 +1,44 @@
+[Unit]
+Description=meshpi: always-on Meshtastic touchscreen node
+# Wait for the USB device and the graphical session.
+After=graphical.target dev-serial-by\x2did.device
+Wants=graphical.target
+
+[Service]
+Type=simple
+# Adjust the user, group, and paths to match your Pi setup.
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/meshpi
+Environment=PYTHONUNBUFFERED=1
+Environment=MESHPI_CONFIG=/home/pi/meshpi/config.toml
+# The Tk GUI needs an X display. With Raspberry Pi OS desktop autologin,
+# the user session owns :0; point at it explicitly so systemd can launch the GUI.
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/pi/.Xauthority
+
+ExecStart=/home/pi/meshpi/.venv/bin/python -m meshpi.app
+
+# Reliability: restart on any non-zero exit, including watchdog-induced exits.
+Restart=always
+RestartSec=5
+# Cap restart storms.
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+# Clean shutdown for SIGTERM.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# Modest hardening that does not break serial or Tk.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+
+# Standard streams go to journald.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical.target

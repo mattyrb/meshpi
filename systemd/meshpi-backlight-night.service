@@ -1,0 +1,6 @@
+[Unit]
+Description=meshpi: set touchscreen backlight to night brightness (off)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo 0 > /sys/class/backlight/rpi_backlight/brightness'

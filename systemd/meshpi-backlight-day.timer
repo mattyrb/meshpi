@@ -1,0 +1,10 @@
+[Unit]
+Description=meshpi: enable day backlight at 06:30 local time
+
+[Timer]
+# OnCalendar uses the system local time zone.
+OnCalendar=*-*-* 06:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
