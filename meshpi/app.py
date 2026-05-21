@@ -116,6 +116,11 @@ class App:
             elif event_type == EVENT_NODE:
                 self._handle_node(payload)
             elif event_type == EVENT_CONNECTED:
+                # The meshtastic library populates its in-memory nodes dict
+                # during the initial sync but does NOT fire per-node events
+                # for the seed. Walk it here so the SQLite nodes table has
+                # rows the moment we are connected.
+                self._seed_nodes()
                 if self.gui is not None:
                     self.gui.push_event("connected", {})
             elif event_type == EVENT_DISCONNECTED:
@@ -123,6 +128,32 @@ class App:
                     self.gui.push_event("disconnected", {})
         except Exception:  # noqa: BLE001
             log.exception("error handling interface event %s", event_type)
+
+    def _seed_nodes(self) -> None:
+        """Upsert every node from the interface's in-memory dict into SQLite.
+
+        Called on connect (initial seed) and from the tick loop (cheap
+        periodic resync that catches any meshtastic.node.updated events
+        we may have missed during a brief stall).
+        """
+        try:
+            nodes = self.iface.nodes() or {}
+        except Exception:  # noqa: BLE001
+            log.exception("iface.nodes() failed during seed")
+            return
+        seeded = 0
+        for node in nodes.values():
+            if not isinstance(node, dict):
+                continue
+            try:
+                self.sqlite.upsert_node(node)
+                seeded += 1
+            except Exception:  # noqa: BLE001
+                log.exception("upsert_node failed during seed")
+        if seeded and self.gui is not None:
+            # Trigger a GUI refresh on the next drain.
+            self.gui.push_event("node", {})
+        log.info("seeded %d node(s) from interface dict", seeded)
 
     def _handle_packet(self, pkt: dict[str, Any]) -> None:
         # Log first; never let downstream handlers swallow the record.
@@ -163,6 +194,7 @@ class App:
     # ----- periodic tick for automations -----
 
     def _tick_loop(self) -> None:
+        ticks = 0
         while not self._tick_stop.is_set():
             now = datetime.now(timezone.utc)
             for auto in self.automations:
@@ -170,6 +202,11 @@ class App:
                     auto.tick(now, self.iface.send_text)
                 except Exception:  # noqa: BLE001
                     log.exception("automation %s tick failed", auto.name)
+            # Re-seed nodes every ~2 minutes so a missed update event
+            # cannot leave the GUI's node list stale forever.
+            ticks += 1
+            if ticks % 4 == 0:
+                self._seed_nodes()
             self._tick_stop.wait(30.0)
 
     # ----- lifecycle -----
