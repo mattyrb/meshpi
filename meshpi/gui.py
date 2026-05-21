@@ -134,6 +134,28 @@ def _fmt_duration(seconds: float | int | None) -> str:
     return f"{secs}s"
 
 
+def _pick_message_font(root: tk.Tk) -> str:
+    """Choose a font family with the broadest Unicode coverage available.
+
+    Tk does not do automatic font fallback per glyph, so the family we
+    set on the messages text widget is the one that has to know how to
+    draw emoji. Preference order, best to worst:
+      Noto Sans         -- huge coverage when fonts-noto-core is installed
+      Symbola           -- monochrome but covers most emoji blocks
+      DejaVu Sans       -- modest Unicode coverage, ships everywhere
+      DejaVu Sans Mono  -- last-resort, no emoji glyphs
+    """
+    try:
+        from tkinter import font as tkfont
+        available = {f.lower() for f in tkfont.families(root)}
+    except Exception:  # noqa: BLE001
+        available = set()
+    for candidate in ("Noto Sans", "Symbola", "DejaVu Sans"):
+        if candidate.lower() in available:
+            return candidate
+    return "DejaVu Sans Mono"
+
+
 def _color_for_snr(snr: float | None) -> str:
     """Three-bucket color ramp: strong green, fair yellow, weak orange, unknown gray."""
     if snr is None:
@@ -584,10 +606,14 @@ class MessagingGui:
         self._refresh_destinations()
 
         # Recent messages text box (top, takes remaining height).
+        # Use a font with broad Unicode coverage so emoji render as glyphs
+        # rather than tofu boxes. Falls back to DejaVu Sans Mono if no
+        # emoji-capable family is installed.
         top = ttk.Frame(frame)
         top.pack(side="top", fill="both", expand=True)
+        message_font = _pick_message_font(self.root)
         self._messages_text = tk.Text(
-            top, wrap="word", height=8, font=("DejaVu Sans Mono", 11)
+            top, wrap="word", height=8, font=(message_font, 11)
         )
         self._messages_text.configure(state="disabled")
         scroll = ttk.Scrollbar(top, command=self._messages_text.yview)

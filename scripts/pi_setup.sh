@@ -11,6 +11,7 @@
 #   1. Disable OS screen blanking via raspi-config (so the touchscreen stays on).
 #   2. Install and enable the day/night backlight systemd timers.
 #   3. Install matchbox-keyboard so the in-app "Kbd" button has something to launch.
+#   4. Install emoji-capable fonts so messages render glyphs instead of tofu boxes.
 #
 # Pass --yes to skip all prompts and accept defaults.
 
@@ -95,7 +96,7 @@ step_install_backlight_timers() {
 
 step_install_keyboard() {
     echo
-    echo "Step 3/3: install matchbox-keyboard (for the in-app Kbd button)"
+    echo "Step 3/4: install matchbox-keyboard (for the in-app Kbd button)"
     if command -v matchbox-keyboard >/dev/null 2>&1; then
         echo "  already installed."
         return
@@ -109,12 +110,45 @@ step_install_keyboard() {
     fi
 }
 
+step_install_emoji_fonts() {
+    echo
+    echo "Step 4/4: install emoji-capable fonts (so messages render glyphs, not boxes)"
+    # fonts-noto-color-emoji: full color emoji (rendered monochrome by Tk).
+    # fonts-symbola: monochrome but very broad Unicode coverage; reliable fallback.
+    # fonts-noto-core: Latin/symbol coverage the messages widget can fall back to.
+    local pkgs=(fonts-noto-color-emoji fonts-symbola fonts-noto-core)
+    local missing=()
+    for p in "${pkgs[@]}"; do
+        if ! dpkg -s "$p" >/dev/null 2>&1; then
+            missing+=("$p")
+        fi
+    done
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        echo "  already installed: ${pkgs[*]}"
+        return
+    fi
+    echo "  will install: ${missing[*]}"
+    if confirm "Install emoji fonts now?"; then
+        sudo apt-get update
+        sudo apt-get install -y "${missing[@]}"
+        # Refresh fontconfig so newly installed fonts are picked up.
+        if command -v fc-cache >/dev/null 2>&1; then
+            sudo fc-cache -f
+        fi
+        echo "  installed. Restart meshpi to pick up the new fonts:"
+        echo "    sudo systemctl restart meshpi"
+    else
+        echo "  skipped."
+    fi
+}
+
 echo "meshpi Pi setup"
 echo "Repo: ${REPO_ROOT}"
 
 step_disable_screen_blanking
 step_install_backlight_timers
 step_install_keyboard
+step_install_emoji_fonts
 
 echo
 echo "Done. If you changed screen-blanking settings, reboot to apply: sudo reboot"

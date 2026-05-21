@@ -189,7 +189,8 @@ Pass `--yes` to accept all defaults non-interactively. The script:
 
 - runs `raspi-config nonint do_blanking 1` to disable OS screen blanking,
 - copies `systemd/meshpi-backlight-{day,night}.{service,timer}` to `/etc/systemd/system/` and enables both timers,
-- installs `matchbox-keyboard` via apt.
+- installs `matchbox-keyboard` via apt,
+- installs `fonts-noto-color-emoji`, `fonts-symbola`, and `fonts-noto-core` so emoji and other Unicode characters render as glyphs instead of tofu boxes.
 
 Reboot after running it the first time so the screen blanking change takes effect: `sudo reboot`.
 
@@ -202,6 +203,9 @@ sudo cp systemd/meshpi-backlight-*.timer   /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now meshpi-backlight-day.timer meshpi-backlight-night.timer
 sudo apt install -y matchbox-keyboard
+sudo apt install -y fonts-noto-color-emoji fonts-symbola fonts-noto-core
+sudo fc-cache -f             # refresh fontconfig
+sudo systemctl restart meshpi  # so the GUI picks up the new fonts
 ```
 
 Edit the times in the two `.timer` files and the brightness values in the two `.service` files to match your hours and display. Verify your backlight path first: `ls /sys/class/backlight/`. Common candidates are `/sys/class/backlight/rpi_backlight/brightness` and `/sys/class/backlight/10-0045/brightness`.
