@@ -220,3 +220,54 @@ class InterfaceManager:
             except Exception:  # noqa: BLE001
                 log.debug("heartbeat failed", exc_info=True)
                 return False
+
+    def my_node_id(self) -> str | None:
+        """Our own node id in the '!xxxxxxxx' format used everywhere else.
+
+        Returned shape matches what the SQLite logger stores in to_id, so
+        callers can compare directly to detect DMs sent to us.
+        """
+        with self._lock:
+            if self._iface is None:
+                return None
+            try:
+                my_info = getattr(self._iface, "myInfo", None)
+                num = getattr(my_info, "my_node_num", None) if my_info else None
+                if num:
+                    return f"!{int(num):08x}"
+            except Exception:  # noqa: BLE001
+                log.debug("my_node_id lookup failed", exc_info=True)
+            return None
+
+    def channels(self) -> list[tuple[int, str]]:
+        """Return active channels as (index, name) tuples.
+
+        Reads from the local node's channel table populated during the
+        initial sync. Channels with role DISABLED are skipped. If the
+        library has not populated channels yet (or the call fails),
+        returns just (0, "default") so the GUI still has something to show.
+        """
+        fallback = [(0, "default")]
+        with self._lock:
+            if self._iface is None:
+                return fallback
+            try:
+                local_node = getattr(self._iface, "localNode", None)
+                ch_list = getattr(local_node, "channels", None) if local_node else None
+                if not ch_list:
+                    return fallback
+                out: list[tuple[int, str]] = []
+                for idx, ch in enumerate(ch_list):
+                    role = getattr(ch, "role", None)
+                    # role enum: 0=DISABLED, 1=PRIMARY, 2=SECONDARY
+                    if role == 0:
+                        continue
+                    settings = getattr(ch, "settings", None)
+                    name = (getattr(settings, "name", "") or "").strip() if settings else ""
+                    if not name:
+                        name = "default" if idx == 0 else f"ch{idx}"
+                    out.append((idx, name))
+                return out or fallback
+            except Exception:  # noqa: BLE001
+                log.debug("channels() failed", exc_info=True)
+                return fallback

@@ -6,18 +6,18 @@ Wants=graphical.target
 
 [Service]
 Type=simple
-# Adjust the user, group, and paths to match your Pi setup.
-User=pi
-Group=pi
-WorkingDirectory=/home/pi/meshpi
+# Adjust the user, group, and paths if your Pi is set up differently.
+User=mbromley
+Group=mbromley
+WorkingDirectory=/home/mbromley/meshpi
 Environment=PYTHONUNBUFFERED=1
-Environment=MESHPI_CONFIG=/home/pi/meshpi/config.toml
+Environment=MESHPI_CONFIG=/home/mbromley/meshpi/config.toml
 # The Tk GUI needs an X display. With Raspberry Pi OS desktop autologin,
 # the user session owns :0; point at it explicitly so systemd can launch the GUI.
 Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/pi/.Xauthority
+Environment=XAUTHORITY=/home/mbromley/.Xauthority
 
-ExecStart=/home/pi/meshpi/.venv/bin/python -m meshpi.app
+ExecStart=/home/mbromley/meshpi/.venv/bin/python -m meshpi.app
 
 # Reliability: restart on any non-zero exit, including watchdog-induced exits.
 Restart=always

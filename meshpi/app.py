@@ -241,6 +241,8 @@ class App:
             recent_messages_provider=self.sqlite.recent_messages,
             nodes_provider=self.sqlite.known_nodes,
             my_position_provider=self._my_position,
+            channels_provider=self.iface.channels,
+            my_node_id_provider=self.iface.my_node_id,
             fullscreen=self.cfg.gui.fullscreen,
             display_timezone=self.cfg.gui.display_timezone,
         )

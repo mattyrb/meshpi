@@ -44,6 +44,64 @@ def _haversine_km(
     return 2 * _EARTH_KM * math.asin(math.sqrt(a))
 
 
+# Meshtastic broadcast destination markers.
+_BROADCAST_IDS = {"^all", "!ffffffff"}
+
+
+def _classify_destination(
+    to_id: str | None,
+    channel: int | None,
+    ch_names: dict[int, str],
+    my_id: str | None,
+) -> str:
+    """Produce a short tag for the message list, e.g. '[ch:0 default]' or '[DM→us]'.
+
+    Broadcasts get the channel tag; targeted packets to our node get DM→us;
+    targeted packets we relayed/heard get DM→<short hex>.
+    """
+    if to_id is None or to_id.lower() in _BROADCAST_IDS:
+        idx = channel if channel is not None else 0
+        name = ch_names.get(int(idx), f"ch{idx}")
+        return f"[ch:{idx} {name}]"
+    if my_id and to_id.lower() == my_id.lower():
+        return "[DM→us]"
+    short = to_id[-4:] if to_id.startswith("!") else to_id
+    return f"[DM→{short}]"
+
+
+def _bbox_with_padding(
+    points: list[tuple[float, float]],
+) -> tuple[float, float, float, float]:
+    """Return (lat_min, lat_max, lon_min, lon_max) with 10% padding.
+
+    Falls back to a small fixed box around the single point when all points
+    coincide, so the projection does not divide by zero.
+    """
+    lats = [p[0] for p in points]
+    lons = [p[1] for p in points]
+    lat_min, lat_max = min(lats), max(lats)
+    lon_min, lon_max = min(lons), max(lons)
+    lat_pad = max((lat_max - lat_min) * 0.1, 0.005)
+    lon_pad = max((lon_max - lon_min) * 0.1, 0.005)
+    return (lat_min - lat_pad, lat_max + lat_pad,
+            lon_min - lon_pad, lon_max + lon_pad)
+
+
+def _color_for_snr(snr: float | None) -> str:
+    """Three-bucket color ramp: strong green, fair yellow, weak orange, unknown gray."""
+    if snr is None:
+        return "#888888"
+    try:
+        s = float(snr)
+    except (TypeError, ValueError):
+        return "#888888"
+    if s >= 5:
+        return "#7ed957"
+    if s >= 0:
+        return "#f5d04a"
+    return "#f08a4b"
+
+
 class MessagingGui:
     """Touchscreen-friendly Tkinter GUI.
 
@@ -61,6 +119,8 @@ class MessagingGui:
         recent_messages_provider: Callable[[int], list[dict[str, Any]]],
         nodes_provider: Callable[[], list[dict[str, Any]]],
         my_position_provider: Callable[[], tuple[float | None, float | None]],
+        channels_provider: Callable[[], list[tuple[int, str]]] | None = None,
+        my_node_id_provider: Callable[[], str | None] | None = None,
         fullscreen: bool = True,
         display_timezone: str = "UTC",
     ):
@@ -69,6 +129,8 @@ class MessagingGui:
         self._recent_messages = recent_messages_provider
         self._nodes = nodes_provider
         self._my_position = my_position_provider
+        self._channels_provider = channels_provider or (lambda: [(0, "default")])
+        self._my_node_id_provider = my_node_id_provider or (lambda: None)
         self._fullscreen = fullscreen
         self._tz = ZoneInfo(display_timezone) if display_timezone else timezone.utc
 
@@ -83,6 +145,16 @@ class MessagingGui:
         self._messages_text: tk.Text | None = None
         self._compose_var: tk.StringVar | None = None
         self._notice_label: ttk.Label | None = None
+
+        # Channel selector state.
+        self._channel_var: tk.StringVar | None = None
+        self._channel_combo: ttk.Combobox | None = None
+        # [(index, "name (ch:N)"), ...] kept in sync with the provider.
+        self._channel_options: list[tuple[int, str]] = []
+
+        # Map tab state.
+        self._map_canvas: tk.Canvas | None = None
+        self._map_status_var: tk.StringVar | None = None
 
     # ----- thread-safe inputs -----
 
@@ -148,6 +220,7 @@ class MessagingGui:
 
         self._notebook.add(self._build_glance_tab(), text="Glance")
         self._notebook.add(self._build_messages_tab(), text="Messages")
+        self._notebook.add(self._build_map_tab(), text="Map")
 
     def _build_glance_tab(self) -> ttk.Frame:
         assert self.root is not None
@@ -202,6 +275,22 @@ class MessagingGui:
         self._messages_text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
+        # Channel selector row. The dropdown is populated from the node's
+        # configured channels and refreshed whenever they change.
+        chrow = ttk.Frame(frame)
+        chrow.pack(fill="x", pady=(8, 0))
+        ttk.Label(chrow, text="Channel:", style="Glance.TLabel").pack(side="left")
+        self._channel_var = tk.StringVar()
+        self._channel_combo = ttk.Combobox(
+            chrow,
+            textvariable=self._channel_var,
+            state="readonly",
+            width=24,
+            font=("DejaVu Sans", 14),
+        )
+        self._channel_combo.pack(side="left", padx=(8, 0))
+        self._refresh_channels()
+
         # Compose row.
         compose = ttk.Frame(frame)
         compose.pack(fill="x", pady=(8, 6))
@@ -230,6 +319,33 @@ class MessagingGui:
 
         return frame
 
+    def _build_map_tab(self) -> ttk.Frame:
+        """Simple offline scatter map. No tiles, no external deps.
+
+        Uses an equirectangular projection auto-fit to the bounding box of
+        all positioned nodes plus our own location. Spokes from our node
+        to each neighbor, dots colored by SNR.
+        """
+        assert self.root is not None
+        frame = ttk.Frame(self.root, padding=4)
+
+        # Status bar at the top with what is plotted.
+        bar = ttk.Frame(frame)
+        bar.pack(fill="x", pady=(0, 4))
+        self._map_status_var = tk.StringVar(value="(no positions yet)")
+        ttk.Label(bar, textvariable=self._map_status_var, style="Glance.TLabel").pack(
+            side="left", padx=4
+        )
+        ttk.Button(bar, text="Redraw", command=self._redraw_map).pack(side="right")
+
+        self._map_canvas = tk.Canvas(
+            frame, bg="#0b1020", highlightthickness=0
+        )
+        self._map_canvas.pack(fill="both", expand=True)
+        # Redraw when the canvas resizes (window resize, tab switch).
+        self._map_canvas.bind("<Configure>", lambda _e: self._redraw_map())
+        return frame
+
     # ----- send actions -----
 
     def _on_send_pressed(self) -> None:
@@ -245,12 +361,51 @@ class MessagingGui:
         self._send_safe(text)
 
     def _send_safe(self, text: str) -> None:
+        ch_idx = self._selected_channel_index()
+        ch_label = self._selected_channel_label()
         try:
-            self._send_text(text)
-            self._set_notice(f"sent: {text}")
+            self._send_text(text, channel=ch_idx)
+            self._set_notice(f"sent on {ch_label}: {text}")
         except Exception as exc:  # noqa: BLE001
             log.exception("send failed")
             self._set_notice(f"send failed: {exc}")
+
+    def _selected_channel_index(self) -> int:
+        """Resolve the dropdown's current selection back to a channel int."""
+        if not self._channel_var or not self._channel_options:
+            return 0
+        label = self._channel_var.get()
+        for idx, formatted in self._channel_options:
+            if formatted == label:
+                return idx
+        return 0
+
+    def _selected_channel_label(self) -> str:
+        if self._channel_var:
+            return self._channel_var.get() or "ch0"
+        return "ch0"
+
+    def _refresh_channels(self) -> None:
+        """Pull the current channel list and refresh the dropdown."""
+        if self._channel_combo is None or self._channel_var is None:
+            return
+        try:
+            channels = self._channels_provider() or [(0, "default")]
+        except Exception:  # noqa: BLE001
+            log.exception("channels_provider failed")
+            channels = [(0, "default")]
+        # Format as "default (ch:0)" so the user sees both name and index.
+        formatted = [(idx, f"{name} (ch:{idx})") for idx, name in channels]
+        if formatted == self._channel_options:
+            return
+        self._channel_options = formatted
+        labels = [f for _idx, f in formatted]
+        self._channel_combo["values"] = labels
+        # Keep current selection if it still exists, otherwise default to the
+        # first channel (typically the public default).
+        current = self._channel_var.get()
+        if current not in labels and labels:
+            self._channel_var.set(labels[0])
 
     # ----- event drain and refresh -----
 
@@ -266,10 +421,13 @@ class MessagingGui:
                     # We rely on the SQL store for content; just trigger refresh.
                     self._refresh_messages()
                     self._refresh_glance()
-                    if event_type == "disconnected":
-                        self._set_notice("interface disconnected")
-                    elif event_type == "connected":
+                    self._refresh_map()
+                    if event_type == "connected":
+                        # Channels are populated after connect; refresh dropdown.
+                        self._refresh_channels()
                         self._set_notice("interface connected")
+                    elif event_type == "disconnected":
+                        self._set_notice("interface disconnected")
         except queue.Empty:
             pass
         self.root.after(250, self._drain_events)
@@ -278,6 +436,8 @@ class MessagingGui:
         if self._stop_event.is_set() or self.root is None:
             return
         self._refresh_glance()
+        self._refresh_channels()
+        self._refresh_map()
         self.root.after(15000, self._periodic_refresh)
 
     def _refresh_messages(self) -> None:
@@ -288,13 +448,21 @@ class MessagingGui:
         except Exception:  # noqa: BLE001
             log.exception("recent_messages provider failed")
             rows = []
+        # Resolve channel index -> name once per refresh.
+        ch_names = {idx: name for idx, name in (self._channels_provider() or [])}
+        my_id = self._my_node_id_provider()
+
         self._messages_text.configure(state="normal")
         self._messages_text.delete("1.0", "end")
         for row in reversed(rows):
             ts = self._fmt_time(row.get("rx_time_utc"))
             from_id = row.get("from_id") or "?"
+            to_id = row.get("to_id")
+            ch_idx = row.get("channel")
             text = row.get("text") or ""
-            line = f"[{ts}] {from_id}: {text}\n"
+
+            tag = _classify_destination(to_id, ch_idx, ch_names, my_id)
+            line = f"[{ts}] {tag} {from_id}: {text}\n"
             self._messages_text.insert("end", line)
         self._messages_text.configure(state="disabled")
         self._messages_text.see("end")
@@ -391,3 +559,115 @@ class MessagingGui:
             return dt.astimezone(self._tz).strftime("%m-%d %H:%M")
         except ValueError:
             return iso_utc
+
+    # ----- map drawing -----
+
+    def _redraw_map(self) -> None:
+        """Clear and repaint the map canvas from the latest SQLite + my-pos."""
+        canvas = self._map_canvas
+        if canvas is None:
+            return
+        canvas.delete("all")
+
+        w = max(canvas.winfo_width(), 2)
+        h = max(canvas.winfo_height(), 2)
+        margin = 30
+
+        try:
+            nodes = self._nodes() or []
+        except Exception:  # noqa: BLE001
+            log.exception("nodes provider failed in map")
+            nodes = []
+        positioned = [
+            n for n in nodes
+            if n.get("latitude") is not None and n.get("longitude") is not None
+        ]
+        try:
+            my_lat, my_lon = self._my_position()
+        except Exception:  # noqa: BLE001
+            my_lat = my_lon = None
+
+        status = self._map_status_var
+        if not positioned and (my_lat is None or my_lon is None):
+            if status is not None:
+                status.set("(no positions yet)")
+            canvas.create_text(
+                w // 2, h // 2,
+                text="No node positions yet. Once nodes broadcast positions,\n"
+                     "they will appear here.",
+                fill="#8aa", justify="center", font=("DejaVu Sans", 12),
+            )
+            return
+
+        # Build the lat/lon list we want to fit. Always include our position
+        # if we have one, so spokes have a valid origin.
+        points: list[tuple[float, float]] = [
+            (float(n["latitude"]), float(n["longitude"])) for n in positioned
+        ]
+        if my_lat is not None and my_lon is not None:
+            points.append((float(my_lat), float(my_lon)))
+
+        lat_min, lat_max, lon_min, lon_max = _bbox_with_padding(points)
+
+        # Equirectangular projection scaled to canvas, longitude scaled by
+        # cos(mean lat) to approximate equal-area at the visible scale.
+        mean_lat_rad = math.radians((lat_min + lat_max) / 2)
+        lon_scale = math.cos(mean_lat_rad) or 1.0
+        lat_range = max(lat_max - lat_min, 1e-6)
+        lon_range = max((lon_max - lon_min) * lon_scale, 1e-6)
+        # Pick the limiting axis so the map keeps an honest aspect ratio.
+        avail_w = w - 2 * margin
+        avail_h = h - 2 * margin
+        scale = min(avail_w / lon_range, avail_h / lat_range)
+        proj_w = lon_range * scale
+        proj_h = lat_range * scale
+        x_off = (w - proj_w) / 2
+        y_off = (h - proj_h) / 2
+
+        def project(lat: float, lon: float) -> tuple[float, float]:
+            x = x_off + (lon - lon_min) * lon_scale * scale
+            y = y_off + (lat_max - lat) * scale  # invert: canvas y grows down
+            return x, y
+
+        # Spokes from our node first, so dots draw on top.
+        if my_lat is not None and my_lon is not None:
+            mx, my = project(my_lat, my_lon)
+            for n in positioned:
+                nx, ny = project(float(n["latitude"]), float(n["longitude"]))
+                canvas.create_line(mx, my, nx, ny, fill="#22344a", width=1)
+
+        # Neighbor dots.
+        for n in positioned:
+            lat = float(n["latitude"])
+            lon = float(n["longitude"])
+            x, y = project(lat, lon)
+            color = _color_for_snr(n.get("snr"))
+            canvas.create_oval(x - 5, y - 5, x + 5, y + 5, fill=color, outline="")
+            label = (
+                n.get("short_name") or
+                (n.get("long_name") or "")[:8] or
+                (n.get("node_id") or "")[-4:]
+            )
+            canvas.create_text(
+                x, y + 10, text=label, fill="#cdd6f4",
+                font=("DejaVu Sans", 9), anchor="n",
+            )
+
+        # Our position last, larger, distinct color.
+        if my_lat is not None and my_lon is not None:
+            mx, my = project(my_lat, my_lon)
+            canvas.create_oval(mx - 8, my - 8, mx + 8, my + 8,
+                               fill="#ff5c5c", outline="#ffffff", width=2)
+            canvas.create_text(mx, my - 14, text="us", fill="#ffffff",
+                               font=("DejaVu Sans", 10, "bold"), anchor="s")
+
+        if status is not None:
+            status.set(
+                f"{len(positioned)} positioned node(s)  "
+                f"{'with' if my_lat is not None else 'without'} our position"
+            )
+
+    def _refresh_map(self) -> None:
+        """Schedule a redraw, used when events arrive."""
+        if self._map_canvas is not None:
+            self._redraw_map()

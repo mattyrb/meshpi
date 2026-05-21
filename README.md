@@ -9,7 +9,7 @@ This README targets a Raspberry Pi 3 running Raspberry Pi OS Bookworm 64-bit wit
 - Owns the serial port to a Meshtastic node (Silicon Labs CP210x, `VID:PID 10C4:EA60`) using a stable `/dev/serial/by-id/...` path so the device name does not shift across reboots.
 - Subscribes to the Meshtastic pubsub events and routes them to a logger, the GUI, and the automation dispatcher inside a single process. No MQTT, no bridging.
 - Logs every packet to SQLite in WAL mode with batched commits, stores the raw JSON alongside parsed columns, and dedups rebroadcasts on `(packet_id, from_id)`.
-- Shows a touch-friendly Tkinter UI with a glance screen, a messages view, and large canned-message buttons.
+- Shows a touch-friendly Tkinter UI with a glance screen, a messages view with channel/DM tags and a channel selector, a simple offline scatter map of positioned nodes, and large canned-message buttons.
 - Runs automations (auto-reply on keywords, quiet-node alert) loaded from config.
 - Includes an application-level watchdog that reconnects on silence and exits non-zero on hard failure so systemd restarts the service cleanly.
 - Optionally syncs SQLite rows to PostGIS through a separate script you run from a timer.
@@ -228,6 +228,61 @@ pip freeze > requirements.lock.txt
 git add requirements.lock.txt && git commit -m "Refresh lock" && git push
 ```
 
+## Day-to-day operations
+
+Once the systemd service is installed and enabled (deploy step 7), meshpi runs on every boot and restarts itself on crash, watchdog-induced exit, or any non-zero exit. You do not need to log into the Pi to bring it back up after a power loss.
+
+Common service commands:
+
+```bash
+sudo systemctl status meshpi          # is it running, recent log tail
+sudo systemctl restart meshpi         # restart now (use after git pull)
+sudo systemctl stop meshpi            # stop without disabling (e.g. to run meshtastic --info)
+sudo systemctl start meshpi
+sudo systemctl disable meshpi         # do not autostart on next boot
+sudo systemctl enable meshpi          # autostart on next boot
+```
+
+Logs go to journald via stdout, so use `journalctl`:
+
+```bash
+journalctl -u meshpi -f                       # live tail; Ctrl-C to detach
+journalctl -u meshpi -n 200                   # last 200 lines
+journalctl -u meshpi --since "1 hour ago"
+journalctl -u meshpi --since today
+journalctl -u meshpi -p err                   # errors only
+```
+
+Crank verbosity by editing the service file to add `Environment=MESHPI_LOG_LEVEL=DEBUG`, then `sudo systemctl daemon-reload && sudo systemctl restart meshpi`.
+
+Quick SQLite inspection without stopping meshpi (WAL mode allows concurrent reads):
+
+```bash
+sqlite3 /mnt/meshpi-data/meshpi.db "SELECT COUNT(*) FROM packets; SELECT COUNT(*) FROM nodes;"
+sqlite3 /mnt/meshpi-data/meshpi.db "SELECT rx_time_utc, from_id, text FROM packets WHERE text IS NOT NULL ORDER BY id DESC LIMIT 10;"
+sqlite3 /mnt/meshpi-data/meshpi.db "SELECT node_id, long_name, last_heard_utc, battery_level FROM nodes ORDER BY last_heard_utc DESC LIMIT 20;"
+```
+
+If `sqlite3` is not installed: `sudo apt install -y sqlite3`. Or use Python: `python3 -c "import sqlite3; print(sqlite3.connect('/mnt/meshpi-data/meshpi.db').execute('SELECT COUNT(*) FROM packets').fetchone())"`.
+
+Talk to the Meshtastic node directly with the CLI. The service must be stopped first because only one process can hold the serial port:
+
+```bash
+sudo systemctl stop meshpi
+meshtastic --port /dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0 --info
+# ... whatever else you want to do ...
+sudo systemctl start meshpi
+```
+
+Quick "recover from a hang" recipe:
+
+```bash
+sudo systemctl restart meshpi
+journalctl -u meshpi -n 50
+```
+
+If it will not start, check the last failure reason with `sudo systemctl status meshpi -l` and the most recent error logs with `journalctl -u meshpi -p err -n 50`. The watchdog and the SQLite logger both record what they did before exit.
+
 ## Configuration reference
 
 See `config.example.toml` for the full set of options with inline comments. Highlights:
@@ -251,5 +306,5 @@ One process. The interface owner is the only thing that touches the serial port.
 ## Out of scope
 
 - MQTT and any other network bridging.
-- Map view in the GUI. A Kivy port could carry that; the GUI is kept behind a thin facade so the toolkit could change without rewriting `app.py`.
+- Tile-backed map (OpenStreetMap, etc.). The current map tab is a dependency-free Tkinter scatter that auto-fits to known positions. A tile view could be added later via `tkintermapview`; the GUI is kept behind a thin facade so the toolkit (or map widget) could change without rewriting `app.py`.
 - Multi-node serial fan-in. This is a single-node appliance.
