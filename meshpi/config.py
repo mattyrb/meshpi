@@ -51,6 +51,14 @@ class BacklightConfig:
     night_brightness: int = 0
     day_start: str = "06:30"
     night_start: str = "22:00"
+    # Idle dim behavior (independent of the scheduled day/night timers).
+    # Set idle_dim_seconds to 0 to disable.
+    idle_dim_seconds: int = 120
+    idle_dim_brightness: int = 30
+    wake_brightness: int = 200
+    # Wake the screen + flash the notice banner when a message arrives.
+    alert_on_message: bool = True
+    alert_on_dm_only: bool = False
 
 
 @dataclass
@@ -149,6 +157,11 @@ def load(path: Path | str | None = None) -> Config:
             night_brightness=int(bl_raw.get("night_brightness", 0)),
             day_start=str(bl_raw.get("day_start", "06:30")),
             night_start=str(bl_raw.get("night_start", "22:00")),
+            idle_dim_seconds=int(bl_raw.get("idle_dim_seconds", 120)),
+            idle_dim_brightness=int(bl_raw.get("idle_dim_brightness", 30)),
+            wake_brightness=int(bl_raw.get("wake_brightness", 200)),
+            alert_on_message=bool(bl_raw.get("alert_on_message", True)),
+            alert_on_dm_only=bool(bl_raw.get("alert_on_dm_only", False)),
         ),
         automations=AutomationsConfig(
             enabled=list(auto_raw.get("enabled", [])),

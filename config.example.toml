@@ -47,11 +47,24 @@ canned_messages = [
 # Confirm with: ls /sys/class/backlight/
 path = "/sys/class/backlight/rpi_backlight/brightness"
 max_brightness_path = "/sys/class/backlight/rpi_backlight/max_brightness"
-# Schedule is enforced by a systemd timer that calls a small helper; see systemd/.
+# Scheduled day/night brightness is enforced by systemd timers; see systemd/.
 day_brightness = 200
 night_brightness = 0
 day_start = "06:30"
 night_start = "22:00"
+# Idle-dim behavior managed by meshpi itself (separate from the day/night
+# schedule). When the touchscreen has been idle for idle_dim_seconds, the
+# brightness drops to idle_dim_brightness. Any touch or a new message
+# restores wake_brightness. Set idle_dim_seconds = 0 to disable.
+# meshpi needs write access to the brightness sysfs file; pi_setup.sh
+# installs a udev rule for this. See README for details.
+idle_dim_seconds = 120
+idle_dim_brightness = 30
+wake_brightness = 200
+# Wake the screen + flash the notice banner when a new message arrives.
+# alert_on_dm_only = true alerts only on direct messages to our node.
+alert_on_message = true
+alert_on_dm_only = false
 
 [automations]
 # List the automation module names (under meshpi.automations) to enable.

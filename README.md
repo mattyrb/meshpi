@@ -42,6 +42,7 @@ meshpi/
     meshpi-backlight-night.{service,timer}
     meshpi-backup.{service,timer}
     meshpi-postgis-sync.{service,timer}
+    99-meshpi-backlight.rules           # udev rule for idle dim/wake permission
   config.example.toml
   requirements.txt             # core deps with loose ranges
   requirements-postgis.txt     # optional psycopg for the sync script
@@ -276,6 +277,66 @@ If you bumped a dependency range and pip resolved a new set, regenerate the lock
 pip freeze > requirements.lock.txt
 git add requirements.lock.txt && git commit -m "Refresh lock" && git push
 ```
+
+## Customizing the canned-message buttons
+
+The large buttons at the bottom of the Messages tab are read from `gui.canned_messages` in `config.toml`. Edit them on the Pi and restart meshpi:
+
+```bash
+nano ~/meshpi/config.toml
+```
+
+Find the block:
+
+```toml
+[gui]
+canned_messages = [
+    "check-in",
+    "OK",
+    "en route",
+    "on my way",
+    "back at base",
+]
+```
+
+Replace with whatever you actually send, for example:
+
+```toml
+canned_messages = [
+    "I hear you in North Reno",
+    "Got it, thanks",
+    "On my way",
+    "Back at base",
+    "Trying to reach you, please reply",
+]
+```
+
+Save (Ctrl+O, Enter, Ctrl+X), then apply:
+
+```bash
+sudo systemctl restart meshpi
+```
+
+The buttons lay out in rows of three on the touchscreen. Keep each message short enough to fit comfortably on a button (~25 characters is a safe target).
+
+## Idle dimming and new-message alerts
+
+Two related behaviors, both configurable under `[backlight]` in `config.toml`:
+
+- **Idle dim.** After `idle_dim_seconds` of no touch input (default 120 seconds), the touchscreen dims to `idle_dim_brightness`. Any touch — or an incoming text message — restores `wake_brightness`. Set `idle_dim_seconds = 0` to disable.
+- **New-message wake.** When a text packet arrives, the screen wakes and the notice banner flashes orange. Set `alert_on_message = false` to disable. Set `alert_on_dm_only = true` to alert only on DMs addressed to your node, not on broadcasts.
+
+For meshpi to actually write the backlight brightness file, the running user needs write access to `/sys/class/backlight/*/brightness`. The `pi_setup.sh` script installs a udev rule that grants this; if you ran the setup helper you're done. To install the rule by hand:
+
+```bash
+sudo cp ~/meshpi/systemd/99-meshpi-backlight.rules /etc/udev/rules.d/
+sudo udevadm control --reload
+sudo udevadm trigger --subsystem-match=backlight
+ls -l /sys/class/backlight/*/brightness        # should be mode -rw-rw-rw-
+sudo systemctl restart meshpi
+```
+
+If the rule isn't installed, meshpi logs a warning at startup and skips the dimming feature without crashing.
 
 ## Day-to-day operations
 

@@ -21,9 +21,11 @@ import queue
 import shutil
 import subprocess
 import threading
+import time
 import tkinter as tk
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from tkinter import ttk
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -134,6 +136,58 @@ def _fmt_duration(seconds: float | int | None) -> str:
     return f"{secs}s"
 
 
+class BacklightController:
+    """Thin wrapper around the touchscreen backlight sysfs interface.
+
+    Tries to write a brightness value; if the file is not writable by the
+    meshpi process (the default on Raspberry Pi OS), silently no-ops so
+    the rest of the GUI keeps working. Document the udev rule in README
+    that grants the user write access.
+    """
+
+    def __init__(self, path: str, max_brightness_path: str = ""):
+        self.path = Path(path) if path else None
+        self.enabled = False
+        self.max_brightness = 255
+        self._current: int | None = None
+
+        if self.path is None or not self.path.exists():
+            log.info("backlight: no sysfs path; idle dimming disabled")
+            return
+        # Try a quick write of whatever is currently there to detect perms.
+        try:
+            current = int(self.path.read_text().strip())
+            self.path.write_text(str(current))
+            self.enabled = True
+            self._current = current
+        except (OSError, ValueError):
+            log.warning(
+                "backlight: cannot write %s (need udev rule); idle dimming disabled",
+                self.path,
+            )
+            return
+
+        # Cap brightness writes at the panel's max.
+        if max_brightness_path:
+            try:
+                self.max_brightness = int(Path(max_brightness_path).read_text().strip())
+            except (OSError, ValueError):
+                pass
+
+    def set_brightness(self, value: int) -> None:
+        """Write a brightness value, clamped to [0, max_brightness]."""
+        if not self.enabled or self.path is None:
+            return
+        value = max(0, min(int(value), self.max_brightness))
+        if value == self._current:
+            return
+        try:
+            self.path.write_text(str(value))
+            self._current = value
+        except OSError:
+            log.debug("backlight write failed", exc_info=True)
+
+
 def _pick_message_font(root: tk.Tk) -> str:
     """Choose a font family with the broadest Unicode coverage available.
 
@@ -195,6 +249,12 @@ class MessagingGui:
         channel_counts_provider: Callable[[], dict[int, int]] | None = None,
         fullscreen: bool = True,
         display_timezone: str = "UTC",
+        backlight: "BacklightController | None" = None,
+        idle_dim_seconds: int = 0,
+        idle_dim_brightness: int = 30,
+        wake_brightness: int = 200,
+        alert_on_message: bool = True,
+        alert_on_dm_only: bool = False,
     ):
         self._send_text = send_text
         self._canned = list(canned_messages)
@@ -246,6 +306,10 @@ class MessagingGui:
         # Virtual keyboard subprocess (matchbox-keyboard / wvkbd / onboard).
         self._kb_process: subprocess.Popen | None = None
         self._kb_button: ttk.Button | None = None
+        # The compose Entry. Stored so we can give it focus when launching
+        # the on-screen keyboard; otherwise matchbox-keyboard injects keys
+        # into whatever widget last had focus (typically the Kbd button).
+        self._compose_entry: ttk.Entry | None = None
 
         # Nodes-tab sort state. None means "use insertion order".
         self._nodes_sort_col: str | None = None
@@ -257,6 +321,19 @@ class MessagingGui:
             "rssi": "RSSI",
             "snr": "SNR",
         }
+
+        # Backlight + idle-dim state.
+        self._backlight = backlight
+        self._idle_dim_seconds = idle_dim_seconds
+        self._idle_dim_brightness = idle_dim_brightness
+        self._wake_brightness = wake_brightness
+        self._alert_on_message = alert_on_message
+        self._alert_on_dm_only = alert_on_dm_only
+        self._last_activity = time.monotonic()
+        self._is_dimmed = False
+        # Notice-banner flash state.
+        self._flash_token = 0
+        self._notice_default_fg: str | None = None
 
     # ----- thread-safe inputs -----
 
@@ -290,11 +367,21 @@ class MessagingGui:
     )
 
     def _toggle_keyboard(self) -> None:
-        """Show or hide a virtual on-screen keyboard."""
+        """Show or hide a virtual on-screen keyboard.
+
+        The on-screen keyboard (matchbox-keyboard etc.) injects keystrokes
+        into whatever widget currently has X focus. If we just launch it
+        after the user taps Kbd, focus is on the button itself and nothing
+        types into the message field. So we move focus to the compose
+        entry before launching, and re-force focus after a short delay
+        in case the keyboard window briefly steals it on appear.
+        """
         if self._kb_process is not None and self._kb_process.poll() is None:
             self._kill_keyboard()
             self._set_notice("keyboard hidden")
             return
+
+        self._focus_compose()
 
         for name, argv in self._KEYBOARD_COMMANDS:
             if shutil.which(argv[0]) is None:
@@ -305,8 +392,13 @@ class MessagingGui:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-                self._set_notice(f"keyboard: {name}")
+                self._set_notice(f"keyboard: {name}  (tap message field if nothing types)")
                 log.info("launched virtual keyboard: %s", name)
+                # Force focus back to the entry after the keyboard window
+                # has had a moment to map onto the screen.
+                if self.root is not None:
+                    self.root.after(250, self._focus_compose)
+                    self.root.after(800, self._focus_compose)
                 return
             except Exception:  # noqa: BLE001
                 log.exception("failed to launch %s", name)
@@ -315,6 +407,18 @@ class MessagingGui:
             "no on-screen keyboard installed; "
             "try: sudo apt install matchbox-keyboard"
         )
+
+    def _focus_compose(self) -> None:
+        """Move keyboard focus to the message-compose Entry."""
+        entry = self._compose_entry
+        if entry is None:
+            return
+        try:
+            entry.focus_force()
+            # Place the cursor at the end so typing appends, not overwrites.
+            entry.icursor("end")
+        except tk.TclError:
+            log.debug("focus_compose failed", exc_info=True)
 
     def _kill_keyboard(self) -> None:
         proc = self._kb_process
@@ -342,12 +446,91 @@ class MessagingGui:
 
         self._build_styles()
         self._build_layout()
+
+        # Start the screen at wake brightness if we control the backlight.
+        if self._backlight is not None and self._backlight.enabled:
+            self._backlight.set_brightness(self._wake_brightness)
+
+        # Bind activity events so we know when the user is interacting.
+        # These bubble up from any child widget via bind_all.
+        for ev in ("<Motion>", "<ButtonPress>", "<KeyPress>"):
+            self.root.bind_all(ev, self._on_user_activity, add="+")
+
         self._refresh_glance()
         self._refresh_messages()
         self.root.after(250, self._drain_events)
         self.root.after(5000, self._periodic_refresh)
+        # Idle check runs on a 5s cadence; cheap and responsive enough.
+        if self._idle_dim_seconds > 0:
+            self.root.after(5000, self._idle_check)
         self.root.protocol("WM_DELETE_WINDOW", self.stop)
         self.root.mainloop()
+
+    # ----- backlight + activity -----
+
+    def _on_user_activity(self, _event=None) -> None:
+        """Called on motion/button/key. Mark activity and wake if dimmed."""
+        self._last_activity = time.monotonic()
+        if self._is_dimmed:
+            self._wake_screen()
+
+    def _wake_screen(self) -> None:
+        if self._backlight is not None and self._backlight.enabled:
+            self._backlight.set_brightness(self._wake_brightness)
+        self._is_dimmed = False
+
+    def _idle_check(self) -> None:
+        if self._stop_event.is_set() or self.root is None:
+            return
+        if self._idle_dim_seconds > 0 and not self._is_dimmed:
+            idle = time.monotonic() - self._last_activity
+            if idle >= self._idle_dim_seconds:
+                if self._backlight is not None and self._backlight.enabled:
+                    self._backlight.set_brightness(self._idle_dim_brightness)
+                self._is_dimmed = True
+        self.root.after(5000, self._idle_check)
+
+    def _alert_new_message(self, payload: Any) -> None:
+        """Wake the screen and flash the notice banner on a new message."""
+        if not self._alert_on_message:
+            return
+        # alert_on_dm_only: ignore broadcasts.
+        if self._alert_on_dm_only:
+            to_id = (payload or {}).get("toId") or (payload or {}).get("to")
+            to_id = str(to_id or "").lower() if to_id is not None else ""
+            my_id = self._my_node_id_provider() or ""
+            if not my_id or to_id != my_id.lower():
+                return
+        self._wake_screen()
+        self._flash_notice()
+
+    def _flash_notice(self, repeats: int = 6, interval_ms: int = 250) -> None:
+        """Briefly alternate the notice label's color to draw the eye."""
+        label = self._notice_label
+        if label is None or self.root is None:
+            return
+        if self._notice_default_fg is None:
+            try:
+                style = ttk.Style(self.root)
+                self._notice_default_fg = style.lookup("Notice.TLabel", "foreground") or "#aa3300"
+            except tk.TclError:
+                self._notice_default_fg = "#aa3300"
+        self._flash_token += 1
+        token = self._flash_token
+
+        def step(remaining: int, on: bool) -> None:
+            # Newer flash supersedes this one.
+            if token != self._flash_token or label is None:
+                return
+            color = "#ff8800" if on else (self._notice_default_fg or "#aa3300")
+            try:
+                label.configure(foreground=color)
+            except tk.TclError:
+                return
+            if remaining > 0 and self.root is not None:
+                self.root.after(interval_ms, step, remaining - 1, not on)
+
+        step(repeats, True)
 
     # ----- layout -----
 
@@ -566,6 +749,8 @@ class MessagingGui:
         self._compose_var = tk.StringVar()
         entry = ttk.Entry(compose, textvariable=self._compose_var, font=("DejaVu Sans", 16))
         entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        # Save the entry so the keyboard launcher can focus it.
+        self._compose_entry = entry
         # Virtual keyboard toggle. Off by default; useful when typing
         # freeform messages on the touchscreen. Press again to dismiss.
         self._kb_button = ttk.Button(
@@ -827,6 +1012,13 @@ class MessagingGui:
                     if event_type == "node":
                         # New node could be a new DM destination.
                         self._refresh_destinations()
+                    if event_type == "packet":
+                        # Wake + flash on incoming text messages (or DMs only,
+                        # depending on config). Skip non-text packets so the
+                        # screen doesn't wake every time a position update lands.
+                        decoded = (payload or {}).get("decoded") or {}
+                        if decoded.get("portnum") == "TEXT_MESSAGE_APP":
+                            self._alert_new_message(payload)
                     if event_type == "connected":
                         # Channels are populated after connect; refresh dropdown.
                         self._refresh_channels()

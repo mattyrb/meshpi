@@ -22,7 +22,7 @@ from typing import Any
 
 from . import config as cfg_mod
 from .automations.base import Automation
-from .gui import MessagingGui
+from .gui import BacklightController, MessagingGui
 from .interface import (
     EVENT_CONNECTED,
     EVENT_DISCONNECTED,
@@ -234,6 +234,14 @@ class App:
         )
         self._tick_thread.start()
 
+        # Backlight controller: tries to write the sysfs file once to
+        # detect permissions, then silently no-ops if the meshpi process
+        # cannot write to it (no udev rule installed yet).
+        bl = BacklightController(
+            self.cfg.backlight.path,
+            self.cfg.backlight.max_brightness_path,
+        )
+
         # GUI runs on the main thread; this blocks until window closes.
         self.gui = MessagingGui(
             send_text=self.iface.send_text,
@@ -248,6 +256,12 @@ class App:
             channel_counts_provider=self.sqlite.channel_message_counts_today,
             fullscreen=self.cfg.gui.fullscreen,
             display_timezone=self.cfg.gui.display_timezone,
+            backlight=bl,
+            idle_dim_seconds=self.cfg.backlight.idle_dim_seconds,
+            idle_dim_brightness=self.cfg.backlight.idle_dim_brightness,
+            wake_brightness=self.cfg.backlight.wake_brightness,
+            alert_on_message=self.cfg.backlight.alert_on_message,
+            alert_on_dm_only=self.cfg.backlight.alert_on_dm_only,
         )
         self.gui.run()
 

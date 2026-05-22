@@ -12,6 +12,8 @@
 #   2. Install and enable the day/night backlight systemd timers.
 #   3. Install matchbox-keyboard so the in-app "Kbd" button has something to launch.
 #   4. Install emoji-capable fonts so messages render glyphs instead of tofu boxes.
+#   5. Install a udev rule so the meshpi user can write to the backlight
+#      brightness file (needed for idle dimming and new-message wake).
 #
 # Pass --yes to skip all prompts and accept defaults.
 
@@ -112,7 +114,7 @@ step_install_keyboard() {
 
 step_install_emoji_fonts() {
     echo
-    echo "Step 4/4: install emoji-capable fonts (so messages render glyphs, not boxes)"
+    echo "Step 4/5: install emoji-capable fonts (so messages render glyphs, not boxes)"
     # fonts-noto-color-emoji: full color emoji (rendered monochrome by Tk).
     # fonts-symbola: monochrome but very broad Unicode coverage; reliable fallback.
     # fonts-noto-core: Latin/symbol coverage the messages widget can fall back to.
@@ -142,6 +144,25 @@ step_install_emoji_fonts() {
     fi
 }
 
+step_install_backlight_udev() {
+    echo
+    echo "Step 5/5: install udev rule so meshpi can dim/wake the backlight"
+    local rule_src="${REPO_ROOT}/systemd/99-meshpi-backlight.rules"
+    local rule_dst="/etc/udev/rules.d/99-meshpi-backlight.rules"
+    if [[ ! -f "$rule_src" ]]; then
+        echo "  rule file not found at $rule_src; skipping."
+        return
+    fi
+    if confirm "Install backlight udev rule?"; then
+        sudo cp "$rule_src" "$rule_dst"
+        sudo udevadm control --reload
+        sudo udevadm trigger --subsystem-match=backlight || true
+        echo "  installed at $rule_dst. Reboot if /sys/class/backlight/*/brightness is not mode 0666."
+    else
+        echo "  skipped."
+    fi
+}
+
 echo "meshpi Pi setup"
 echo "Repo: ${REPO_ROOT}"
 
@@ -149,6 +170,7 @@ step_disable_screen_blanking
 step_install_backlight_timers
 step_install_keyboard
 step_install_emoji_fonts
+step_install_backlight_udev
 
 echo
 echo "Done. If you changed screen-blanking settings, reboot to apply: sudo reboot"
