@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import queue
 import shutil
 import subprocess
@@ -358,12 +359,15 @@ class MessagingGui:
     # ----- virtual keyboard -----
 
     # Order matters: prefer Wayland-native, then X11 options. The first one
-    # that is on PATH is used.
-    _KEYBOARD_COMMANDS: tuple[tuple[str, list[str]], ...] = (
-        ("wvkbd-mobintl", ["wvkbd-mobintl", "-L", "240"]),
-        ("matchbox-keyboard", ["matchbox-keyboard"]),
-        ("onboard", ["onboard"]),
-        ("florence", ["florence"]),
+    # that is on PATH is used. The dict adds environment variables for the
+    # spawn; onboard needs GDK_BACKEND=x11 under our systemd unit because
+    # the service does not export the Wayland session env, and onboard
+    # otherwise tries Wayland first and silently fails to map a window.
+    _KEYBOARD_COMMANDS: tuple[tuple[str, list[str], dict[str, str]], ...] = (
+        ("wvkbd-mobintl",    ["wvkbd-mobintl", "-L", "240"], {}),
+        ("matchbox-keyboard", ["matchbox-keyboard"],          {}),
+        ("onboard",          ["onboard"],                     {"GDK_BACKEND": "x11"}),
+        ("florence",         ["florence"],                    {}),
     )
 
     def _toggle_keyboard(self) -> None:
@@ -383,17 +387,25 @@ class MessagingGui:
 
         self._focus_compose()
 
-        for name, argv in self._KEYBOARD_COMMANDS:
+        for name, argv, extra_env in self._KEYBOARD_COMMANDS:
             if shutil.which(argv[0]) is None:
                 continue
             try:
+                # Inherit meshpi's env (DISPLAY, XAUTHORITY, etc.) and add
+                # per-keyboard overrides like GDK_BACKEND=x11 for onboard.
+                env = os.environ.copy()
+                env.update(extra_env)
+                # Let the keyboard's stderr land in our journal so we can
+                # see why a launch silently failed (e.g. "could not open
+                # display"). stdout still goes to /dev/null to keep noise
+                # down.
                 self._kb_process = subprocess.Popen(  # noqa: S603
                     argv,
+                    env=env,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
                 )
                 self._set_notice(f"keyboard: {name}  (tap message field if nothing types)")
-                log.info("launched virtual keyboard: %s", name)
+                log.info("launched virtual keyboard: %s env+=%s", name, extra_env)
                 # Force focus back to the entry after the keyboard window
                 # has had a moment to map onto the screen.
                 if self.root is not None:
