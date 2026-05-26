@@ -107,6 +107,47 @@ class App:
         if self.gui is not None:
             self.gui.show_notice(source, message)
 
+    def _send_text_logged(
+        self,
+        text: str,
+        destination: str | int | None = None,
+        channel: int = 0,
+        want_ack: bool = False,
+    ) -> None:
+        """Send a text packet AND log it locally so it shows up in our own
+        message history.
+
+        The meshtastic library does not echo our outbound packets back
+        through the receive callback, so the SQLite logger would never see
+        them otherwise and the GUI would not display them. This wrapper
+        is what we pass to the GUI and automations instead of the raw
+        InterfaceManager.send_text.
+        """
+        # Send first. If this raises, we do NOT log a phantom message.
+        self.iface.send_text(
+            text, destination=destination, channel=channel, want_ack=want_ack
+        )
+        try:
+            my_id = self.iface.my_node_id() or "us"
+            to_id = destination if destination is not None else "^all"
+            self.sqlite.log_packet({
+                "id": None,  # local message; no mesh packet id
+                "fromId": my_id,
+                "toId": to_id,
+                "channel": int(channel),
+                "decoded": {
+                    "portnum": "TEXT_MESSAGE_APP",
+                    "text": text,
+                },
+            })
+            # Flush so the row is queryable immediately, not in 5 seconds.
+            self.sqlite.flush()
+            if self.gui is not None:
+                # Nudge the GUI to refresh the messages list.
+                self.gui.push_event("packet", {})
+        except Exception:  # noqa: BLE001
+            log.exception("failed to log sent message")
+
     # ----- event fan-out from interface -----
 
     def _on_iface_event(self, event_type: str, payload: Any) -> None:
@@ -172,9 +213,9 @@ class App:
         for auto in self.automations:
             try:
                 if portnum == "TEXT_MESSAGE_APP":
-                    auto.on_text(pkt, self.iface.send_text)
+                    auto.on_text(pkt, self._send_text_logged)
                 elif portnum == "POSITION_APP":
-                    auto.on_position(pkt, self.iface.send_text)
+                    auto.on_position(pkt, self._send_text_logged)
             except Exception:  # noqa: BLE001
                 log.exception("automation %s on packet failed", auto.name)
 
@@ -187,7 +228,7 @@ class App:
             self.gui.push_event("node", node)
         for auto in self.automations:
             try:
-                auto.on_node_update(node, self.iface.send_text)
+                auto.on_node_update(node, self._send_text_logged)
             except Exception:  # noqa: BLE001
                 log.exception("automation %s on node failed", auto.name)
 
@@ -199,7 +240,7 @@ class App:
             now = datetime.now(timezone.utc)
             for auto in self.automations:
                 try:
-                    auto.tick(now, self.iface.send_text)
+                    auto.tick(now, self._send_text_logged)
                 except Exception:  # noqa: BLE001
                     log.exception("automation %s tick failed", auto.name)
             # Re-seed nodes every ~2 minutes so a missed update event
@@ -244,7 +285,7 @@ class App:
 
         # GUI runs on the main thread; this blocks until window closes.
         self.gui = MessagingGui(
-            send_text=self.iface.send_text,
+            send_text=self._send_text_logged,
             canned_messages=self.cfg.gui.canned_messages,
             recent_messages_provider=self.sqlite.recent_messages,
             nodes_provider=self.sqlite.known_nodes,

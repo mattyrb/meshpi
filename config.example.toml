@@ -32,11 +32,11 @@ fullscreen = true
 display_timezone = "America/Los_Angeles"
 # Canned message buttons, shown big for thumb taps.
 canned_messages = [
-    "check-in",
+    "test",
     "OK",
-    "en route",
-    "on my way",
-    "back at base",
+    "Heard in North Reno",
+    "Goodmorning!",
+    "Goodnight",
 ]
 
 [backlight]
