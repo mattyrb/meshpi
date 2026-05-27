@@ -1,11 +1,16 @@
 # meshpi: allow the running user to write to the touchscreen backlight
-# brightness sysfs file. This is what lets the app dim the screen on idle
-# and wake it on new messages, without running as root.
+# control files. This is what lets the app dim, fully power-off, and
+# wake the screen without running as root.
+#
+# Two files matter:
+#   brightness  -- 0..max_brightness, controls panel brightness
+#   bl_power    -- 0 = on, 1 = off (the deeper, LED-power form of "off")
 #
 # Install:
 #   sudo cp 99-meshpi-backlight.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload
 #   sudo udevadm trigger --subsystem-match=backlight
 #
-# Reboot if you do not see the brightness file flip to mode 0666.
+# Reboot if you do not see both files flip to mode 0666.
 SUBSYSTEM=="backlight", ACTION=="add", RUN+="/bin/chmod 0666 /sys/class/backlight/%k/brightness"
+SUBSYSTEM=="backlight", ACTION=="add", RUN+="/bin/sh -c '[ -e /sys/class/backlight/%k/bl_power ] && /bin/chmod 0666 /sys/class/backlight/%k/bl_power'"

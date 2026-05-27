@@ -140,33 +140,45 @@ def _fmt_duration(seconds: float | int | None) -> str:
 class BacklightController:
     """Thin wrapper around the touchscreen backlight sysfs interface.
 
-    Tries to write a brightness value; if the file is not writable by the
-    meshpi process (the default on Raspberry Pi OS), silently no-ops so
-    the rest of the GUI keeps working. Document the udev rule in README
-    that grants the user write access.
+    Two independent controls:
+      - brightness (0..max_brightness): writes the panel's brightness file
+      - power (on/off): writes the bl_power file. Writing 1 fully powers
+        off the backlight LEDs; touch still wakes because the touch panel
+        is independent. Writing 0 powers them back on.
+
+    Each control is enabled only if its sysfs file exists and is writable
+    by the meshpi process. Failures silently no-op so the rest of the GUI
+    keeps working; see the udev rule documented in README.
     """
 
-    def __init__(self, path: str, max_brightness_path: str = ""):
+    def __init__(
+        self,
+        path: str,
+        max_brightness_path: str = "",
+        bl_power_path: str = "",
+    ):
         self.path = Path(path) if path else None
+        self.bl_power_path = Path(bl_power_path) if bl_power_path else None
         self.enabled = False
+        self.power_enabled = False
         self.max_brightness = 255
         self._current: int | None = None
+        self._power: int | None = None  # 0 = on, 1 = off
 
         if self.path is None or not self.path.exists():
             log.info("backlight: no sysfs path; idle dimming disabled")
-            return
-        # Try a quick write of whatever is currently there to detect perms.
-        try:
-            current = int(self.path.read_text().strip())
-            self.path.write_text(str(current))
-            self.enabled = True
-            self._current = current
-        except (OSError, ValueError):
-            log.warning(
-                "backlight: cannot write %s (need udev rule); idle dimming disabled",
-                self.path,
-            )
-            return
+        else:
+            try:
+                current = int(self.path.read_text().strip())
+                self.path.write_text(str(current))
+                self.enabled = True
+                self._current = current
+            except (OSError, ValueError):
+                log.warning(
+                    "backlight: cannot write %s (need udev rule); "
+                    "idle dimming disabled",
+                    self.path,
+                )
 
         # Cap brightness writes at the panel's max.
         if max_brightness_path:
@@ -174,6 +186,23 @@ class BacklightController:
                 self.max_brightness = int(Path(max_brightness_path).read_text().strip())
             except (OSError, ValueError):
                 pass
+
+        # bl_power is independent of brightness; probe separately.
+        if self.bl_power_path is not None and self.bl_power_path.exists():
+            try:
+                current_power = int(self.bl_power_path.read_text().strip())
+                self.bl_power_path.write_text(str(current_power))
+                self.power_enabled = True
+                self._power = current_power
+            except (OSError, ValueError):
+                log.warning(
+                    "backlight: cannot write %s (need udev rule); "
+                    "full power-off disabled",
+                    self.bl_power_path,
+                )
+        elif bl_power_path:
+            log.info("backlight: bl_power path %s not found; "
+                     "full power-off disabled", bl_power_path)
 
     def set_brightness(self, value: int) -> None:
         """Write a brightness value, clamped to [0, max_brightness]."""
@@ -187,6 +216,19 @@ class BacklightController:
             self._current = value
         except OSError:
             log.debug("backlight write failed", exc_info=True)
+
+    def set_power(self, on: bool) -> None:
+        """Turn the backlight LEDs fully on or off via bl_power."""
+        if not self.power_enabled or self.bl_power_path is None:
+            return
+        target = 0 if on else 1  # bl_power convention: 0=on, 1=off
+        if target == self._power:
+            return
+        try:
+            self.bl_power_path.write_text(str(target))
+            self._power = target
+        except OSError:
+            log.debug("backlight power write failed", exc_info=True)
 
 
 def _pick_message_font(root: tk.Tk) -> str:
@@ -253,6 +295,7 @@ class MessagingGui:
         backlight: "BacklightController | None" = None,
         idle_dim_seconds: int = 0,
         idle_dim_brightness: int = 30,
+        idle_off_seconds: int = 0,
         wake_brightness: int = 200,
         alert_on_message: bool = True,
         alert_on_dm_only: bool = False,
@@ -327,11 +370,13 @@ class MessagingGui:
         self._backlight = backlight
         self._idle_dim_seconds = idle_dim_seconds
         self._idle_dim_brightness = idle_dim_brightness
+        self._idle_off_seconds = idle_off_seconds
         self._wake_brightness = wake_brightness
         self._alert_on_message = alert_on_message
         self._alert_on_dm_only = alert_on_dm_only
         self._last_activity = time.monotonic()
         self._is_dimmed = False
+        self._is_off = False
         # Notice-banner flash state.
         self._flash_token = 0
         self._notice_default_fg: str | None = None
@@ -481,25 +526,46 @@ class MessagingGui:
     # ----- backlight + activity -----
 
     def _on_user_activity(self, _event=None) -> None:
-        """Called on motion/button/key. Mark activity and wake if dimmed."""
+        """Called on motion/button/key. Mark activity and wake if asleep."""
         self._last_activity = time.monotonic()
-        if self._is_dimmed:
+        if self._is_dimmed or self._is_off:
             self._wake_screen()
 
     def _wake_screen(self) -> None:
-        if self._backlight is not None and self._backlight.enabled:
-            self._backlight.set_brightness(self._wake_brightness)
+        """Restore full brightness and power. Cheap; no-ops if already awake."""
+        if self._backlight is not None:
+            if self._is_off and self._backlight.power_enabled:
+                self._backlight.set_power(True)
+            if self._backlight.enabled:
+                self._backlight.set_brightness(self._wake_brightness)
         self._is_dimmed = False
+        self._is_off = False
 
     def _idle_check(self) -> None:
         if self._stop_event.is_set() or self.root is None:
             return
-        if self._idle_dim_seconds > 0 and not self._is_dimmed:
-            idle = time.monotonic() - self._last_activity
-            if idle >= self._idle_dim_seconds:
-                if self._backlight is not None and self._backlight.enabled:
-                    self._backlight.set_brightness(self._idle_dim_brightness)
-                self._is_dimmed = True
+        idle = time.monotonic() - self._last_activity
+
+        # Stage 1: dim
+        if (
+            self._idle_dim_seconds > 0
+            and not self._is_dimmed
+            and idle >= self._idle_dim_seconds
+        ):
+            if self._backlight is not None and self._backlight.enabled:
+                self._backlight.set_brightness(self._idle_dim_brightness)
+            self._is_dimmed = True
+
+        # Stage 2: full off via bl_power
+        if (
+            self._idle_off_seconds > 0
+            and not self._is_off
+            and idle >= self._idle_off_seconds
+        ):
+            if self._backlight is not None and self._backlight.power_enabled:
+                self._backlight.set_power(False)
+                self._is_off = True
+
         self.root.after(5000, self._idle_check)
 
     def _alert_new_message(self, payload: Any) -> None:

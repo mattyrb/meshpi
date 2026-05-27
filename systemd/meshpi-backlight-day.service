@@ -1,8 +1,9 @@
 [Unit]
-Description=meshpi: set touchscreen backlight to day brightness
+Description=meshpi: turn touchscreen backlight on and set day brightness
 
 [Service]
 Type=oneshot
-# Read brightness from config and write the sysfs file.
-# Adjust the values and path to match your display; see config.example.toml.
-ExecStart=/bin/sh -c 'echo 200 > /sys/class/backlight/rpi_backlight/brightness'
+# bl_power=0 powers the LEDs back on (in case night had turned them off),
+# then write the day brightness value.
+# Adjust the path to match your display (e.g. 10-0045 on newer kernels).
+ExecStart=/bin/sh -c 'echo 0 > /sys/class/backlight/rpi_backlight/bl_power || true; echo 200 > /sys/class/backlight/rpi_backlight/brightness || true'

@@ -47,14 +47,21 @@ class GuiConfig:
 class BacklightConfig:
     path: str = ""
     max_brightness_path: str = ""
+    # bl_power sysfs file. Writing 1 turns the panel LEDs fully off
+    # (deeper than brightness=0). Writing 0 turns them back on.
+    # Touch still wakes the screen because the touch panel is independent.
+    bl_power_path: str = ""
     day_brightness: int = 200
     night_brightness: int = 0
     day_start: str = "06:30"
     night_start: str = "22:00"
     # Idle dim behavior (independent of the scheduled day/night timers).
-    # Set idle_dim_seconds to 0 to disable.
+    # Set idle_dim_seconds to 0 to disable idle dim entirely.
     idle_dim_seconds: int = 120
     idle_dim_brightness: int = 30
+    # After idle_off_seconds the backlight is also fully powered off via
+    # bl_power. Set to 0 to disable; touch wakes it back up.
+    idle_off_seconds: int = 600
     wake_brightness: int = 200
     # Wake the screen + flash the notice banner when a message arrives.
     alert_on_message: bool = True
@@ -153,12 +160,14 @@ def load(path: Path | str | None = None) -> Config:
         backlight=BacklightConfig(
             path=str(bl_raw.get("path", "")),
             max_brightness_path=str(bl_raw.get("max_brightness_path", "")),
+            bl_power_path=str(bl_raw.get("bl_power_path", "")),
             day_brightness=int(bl_raw.get("day_brightness", 200)),
             night_brightness=int(bl_raw.get("night_brightness", 0)),
             day_start=str(bl_raw.get("day_start", "06:30")),
             night_start=str(bl_raw.get("night_start", "22:00")),
             idle_dim_seconds=int(bl_raw.get("idle_dim_seconds", 120)),
             idle_dim_brightness=int(bl_raw.get("idle_dim_brightness", 30)),
+            idle_off_seconds=int(bl_raw.get("idle_off_seconds", 600)),
             wake_brightness=int(bl_raw.get("wake_brightness", 200)),
             alert_on_message=bool(bl_raw.get("alert_on_message", True)),
             alert_on_dm_only=bool(bl_raw.get("alert_on_dm_only", False)),

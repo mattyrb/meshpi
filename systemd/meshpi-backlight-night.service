@@ -1,6 +1,8 @@
 [Unit]
-Description=meshpi: set touchscreen backlight to night brightness (off)
+Description=meshpi: turn touchscreen backlight fully off (night)
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'echo 0 > /sys/class/backlight/rpi_backlight/brightness'
+# Write brightness=0 AND bl_power=1 so the panel LEDs are actually off.
+# Adjust the path if your display enumerates differently (see README).
+ExecStart=/bin/sh -c 'echo 0 > /sys/class/backlight/rpi_backlight/brightness || true; echo 1 > /sys/class/backlight/rpi_backlight/bl_power || true'

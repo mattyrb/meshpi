@@ -1,9 +1,11 @@
 [Unit]
-Description=meshpi: enable day backlight at 06:30 local time
+Description=meshpi: enable day backlight at 08:00 local time (weekdays)
 
 [Timer]
 # OnCalendar uses the system local time zone.
-OnCalendar=*-*-* 06:30:00
+# Mon..Fri 08:00 because the office isn't used on weekends; if you want
+# it daily, change to:  OnCalendar=*-*-* 08:00:00
+OnCalendar=Mon..Fri 08:00:00
 Persistent=true
 
 [Install]

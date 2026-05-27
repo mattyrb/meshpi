@@ -319,24 +319,29 @@ sudo systemctl restart meshpi
 
 The buttons lay out in rows of three on the touchscreen. Keep each message short enough to fit comfortably on a button (~25 characters is a safe target).
 
-## Idle dimming and new-message alerts
+## Idle dim, full-off, and new-message alerts
 
-Two related behaviors, both configurable under `[backlight]` in `config.toml`:
+Four related behaviors, all configurable under `[backlight]` in `config.toml`:
 
-- **Idle dim.** After `idle_dim_seconds` of no touch input (default 120 seconds), the touchscreen dims to `idle_dim_brightness`. Any touch — or an incoming text message — restores `wake_brightness`. Set `idle_dim_seconds = 0` to disable.
-- **New-message wake.** When a text packet arrives, the screen wakes and the notice banner flashes orange. Set `alert_on_message = false` to disable. Set `alert_on_dm_only = true` to alert only on DMs addressed to your node, not on broadcasts.
+- **Idle dim** (stage 1). After `idle_dim_seconds` of no touch input (default 120 seconds), the touchscreen dims to `idle_dim_brightness`. Set `idle_dim_seconds = 0` to disable.
+- **Idle full-off** (stage 2). After `idle_off_seconds` (default 600 seconds = 10 minutes), the backlight LEDs are powered off entirely via the `bl_power` sysfs file. This is deeper than `brightness=0`; the panel goes dark instead of dimly glowing. Touch still wakes the screen because the touch panel is independent of the backlight. Set `idle_off_seconds = 0` to disable.
+- **Wake on activity.** Any touch or new message restores `wake_brightness` and powers the LEDs back on.
+- **New-message wake/alert.** When a text packet arrives, the screen wakes and the notice banner flashes orange. Set `alert_on_message = false` to disable. Set `alert_on_dm_only = true` to alert only on DMs addressed to your node, not on broadcasts.
 
-For meshpi to actually write the backlight brightness file, the running user needs write access to `/sys/class/backlight/*/brightness`. The `pi_setup.sh` script installs a udev rule that grants this; if you ran the setup helper you're done. To install the rule by hand:
+For meshpi to actually write the backlight files, the running user needs write access to `/sys/class/backlight/*/brightness` and `/sys/class/backlight/*/bl_power`. The `pi_setup.sh` script installs a udev rule that grants this; if you ran the setup helper you're done. To install the rule by hand:
 
 ```bash
 sudo cp ~/meshpi/systemd/99-meshpi-backlight.rules /etc/udev/rules.d/
 sudo udevadm control --reload
 sudo udevadm trigger --subsystem-match=backlight
-ls -l /sys/class/backlight/*/brightness        # should be mode -rw-rw-rw-
+ls -l /sys/class/backlight/*/brightness /sys/class/backlight/*/bl_power
+# both should show mode -rw-rw-rw-
 sudo systemctl restart meshpi
 ```
 
-If the rule isn't installed, meshpi logs a warning at startup and skips the dimming feature without crashing.
+If the rule isn't installed, meshpi logs a warning at startup and skips the respective feature (dim, off, or both) without crashing.
+
+The scheduled day/night backlight timers (`systemd/meshpi-backlight-{day,night}.service`) also use `bl_power`: night turns it off, day turns it back on. So when the night timer fires, the screen goes fully dark even if you're standing in front of it; touch wakes it for `idle_off_seconds` seconds before it shuts off again, until the day timer powers things back on the next morning.
 
 ## Day-to-day operations
 

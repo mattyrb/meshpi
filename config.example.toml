@@ -47,19 +47,28 @@ canned_messages = [
 # Confirm with: ls /sys/class/backlight/
 path = "/sys/class/backlight/rpi_backlight/brightness"
 max_brightness_path = "/sys/class/backlight/rpi_backlight/max_brightness"
+# bl_power sysfs file. Writing 1 fully powers off the panel LEDs (deeper
+# than brightness=0). Touch still wakes the screen because the touch
+# panel is independent. Leave blank to skip power-off control.
+bl_power_path = "/sys/class/backlight/rpi_backlight/bl_power"
 # Scheduled day/night brightness is enforced by systemd timers; see systemd/.
 day_brightness = 200
 night_brightness = 0
-day_start = "06:30"
-night_start = "22:00"
-# Idle-dim behavior managed by meshpi itself (separate from the day/night
-# schedule). When the touchscreen has been idle for idle_dim_seconds, the
-# brightness drops to idle_dim_brightness. Any touch or a new message
-# restores wake_brightness. Set idle_dim_seconds = 0 to disable.
-# meshpi needs write access to the brightness sysfs file; pi_setup.sh
-# installs a udev rule for this. See README for details.
+day_start = "08:00"
+night_start = "18:00"
+# Idle dim/off behavior managed by meshpi itself, separate from the
+# day/night schedule. Two stages:
+#   1. After idle_dim_seconds, brightness drops to idle_dim_brightness.
+#   2. After idle_off_seconds, the backlight is fully powered off via
+#      bl_power (deeper than dim; saves a bit more wear and is darker).
+# Any touch or new message restores wake_brightness and powers back on.
+# Set either to 0 to disable that stage. idle_off_seconds must be larger
+# than idle_dim_seconds when both are enabled.
+# meshpi needs write access to the brightness and bl_power files; the
+# pi_setup.sh udev rule grants it.
 idle_dim_seconds = 120
 idle_dim_brightness = 30
+idle_off_seconds = 600
 wake_brightness = 200
 # Wake the screen + flash the notice banner when a new message arrives.
 # alert_on_dm_only = true alerts only on direct messages to our node.

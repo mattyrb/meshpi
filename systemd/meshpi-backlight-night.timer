@@ -1,8 +1,10 @@
 [Unit]
-Description=meshpi: blank backlight at 22:00 local time
+Description=meshpi: blank backlight at 18:00 local time (daily)
 
 [Timer]
-OnCalendar=*-*-* 22:00:00
+# Daily so the screen still powers off on Saturdays even though the
+# weekday day-on timer won't bring it back until Monday morning.
+OnCalendar=*-*-* 18:00:00
 Persistent=true
 
 [Install]

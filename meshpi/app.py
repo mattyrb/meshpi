@@ -275,12 +275,14 @@ class App:
         )
         self._tick_thread.start()
 
-        # Backlight controller: tries to write the sysfs file once to
+        # Backlight controller: tries to write the sysfs files once to
         # detect permissions, then silently no-ops if the meshpi process
-        # cannot write to it (no udev rule installed yet).
+        # cannot write to them (no udev rule installed yet). Each of
+        # brightness and bl_power is probed independently.
         bl = BacklightController(
             self.cfg.backlight.path,
             self.cfg.backlight.max_brightness_path,
+            self.cfg.backlight.bl_power_path,
         )
 
         # GUI runs on the main thread; this blocks until window closes.
@@ -300,6 +302,7 @@ class App:
             backlight=bl,
             idle_dim_seconds=self.cfg.backlight.idle_dim_seconds,
             idle_dim_brightness=self.cfg.backlight.idle_dim_brightness,
+            idle_off_seconds=self.cfg.backlight.idle_off_seconds,
             wake_brightness=self.cfg.backlight.wake_brightness,
             alert_on_message=self.cfg.backlight.alert_on_message,
             alert_on_dm_only=self.cfg.backlight.alert_on_dm_only,
